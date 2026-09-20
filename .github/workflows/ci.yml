@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  verify:
+    name: 类型校验 + 单测 + 仿真
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 安装依赖
+        run: npm install
+
+      - name: 类型校验
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 无头仿真验收
+        run: npm run sim
+
+      - name: DCO 签名检查
+        run: node scripts/check-dco.mjs

@@ -1,0 +1,21 @@
+#!/bin/sh
+# DCO (Developer Certificate of Origin) sign-off hook.
+# 确保每次提交信息都携带 Signed-off-by 行。
+# 安装方式：
+#   cp tools/dco/commit-msg .git/hooks/commit-msg
+#   chmod +x .git/hooks/commit-msg
+# 或跨仓库全局启用：
+#   git config --global core.hooksPath "$HOME/.git-hooks"
+#   cp tools/dco/commit-msg "$HOME/.git-hooks/commit-msg"
+
+MSG="$1"
+SOB="Signed-off-by: $(git config user.name) <$(git config user.email)>"
+
+# 已有 Signed-off-by，无需追加
+if grep -qs "^Signed-off-by: " "$MSG"; then
+  exit 0
+fi
+
+# 追加一个空行分隔再写签名行
+printf '\n%s\n' "$SOB" >> "$MSG"
+exit 0
