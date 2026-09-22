@@ -20,8 +20,8 @@
  * 注意：avoidanceEnabled（是否开启辅助避障）**不参与**颜色判定——
  * 「近障碍」就是「近障碍」，与用户有没有开辅助无关（关了辅助照样会撞）。
  */
-import { AVOID_MARGIN_M, AVOID_SAFE_DIST_M } from './CollisionDetector';
-import { Logger } from './Logger';
+import { AVOID_MARGIN_M, AVOID_SAFE_DIST_M } from '../avoidance/CollisionDetector';
+import { Logger } from '../core/Logger';
 
 /**
  * HUD 威胁等级（序即严重程度：Safe < Caution < Warning < Danger）。

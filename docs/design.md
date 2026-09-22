@@ -4,7 +4,7 @@
 
 ARDroneHarmony 是一套基于 `@kit.AREngine` 的 AR 无人机 App。其飞控与避障逻辑质量较高，但强耦合于 OpenHarmony 专有套件，无法在普通开发机 / CI 中编译与单测，也难以被社区复用。
 
-本仓库目标：**把可独立验证的算法子集剥离成零专有依赖的纯逻辑层**，作为向 OpenHarmony **UAV SIG** 孵化的第一步（里程碑 M1）。
+本仓库目标：**把可独立验证的算法子集剥离成零专有依赖的纯逻辑层**，作为向 OpenHarmony **UAV SIG** 孵化的第一步（里程碑 M1）；M2 起按领域拆分为 `core` / `model` / `avoidance` / `telemetry` / `contract` 五个模块。
 
 已实现的可提取代码约 1500 行，覆盖：
 
@@ -40,16 +40,28 @@ DroneController
   2. 离线 `MockPerception`（确定性注入，用于 CI / 单测）
   3. 仿真引擎（联合仿真模式）
 
-## 4. 分层与职责
+## 4. 模块分层与依赖方向（M2 起按领域切分）
 
-| 层 | 文件 | 职责 |
+```
+src/
+├── core/        零依赖基础设施：Vec3 / Logger / LoggerLevel
+├── model/       飞行动力学状态机：DroneController / WorldObject
+├── avoidance/   碰撞评估 + 转向力合成：CollisionDetector / SteeringBehavior
+├── telemetry/   对外可观测状态推导：HudModel
+└── contract/    空间感知输入抽象接口：SpatialPerception
+```
+
+自底向上**单向依赖**（禁止反向 import）：
+
+| 模块 | 依赖 | 职责 |
 | --- | --- | --- |
-| 基础 | `Vec3`, `Logger`, `LoggerLevel` | 数值 / 日志原语 |
-| 物理层 L5 | `CollisionDetector`, `SteeringBehavior` | 碰撞评估、转向避障（纯函数） |
-| 控制层 | `DroneController` | 状态机 + 速度积分 + 姿态推导 |
-| UI 层 L7 | `HudModel` | 威胁等级 / 配色 / 文案（纯函数） |
-| 世界层 L3 | `WorldObject` | 锚定 + 偏移的位姿推导 |
-| 契约 | `perception/SpatialPerception` | 算法与数据源的边界 |
+| `core` | 无 | 数值 / 向量 / 日志原语，被所有模块共享 |
+| `model` | `core` | 状态机 + 速度积分 + 姿态推导；锚定 + 偏移位姿推导 |
+| `avoidance` | `core` | 碰撞评估、转向避障（纯函数） |
+| `telemetry` | `core`, `avoidance` | 威胁等级 / 配色 / 文案（纯函数） |
+| `contract` | `core`（仅 `Vec3` 类型） | 算法与数据源的唯一边界 |
+
+> 纪律：`model` / `avoidance` 为零依赖底层（只依赖 `core`），不得反向依赖 `telemetry` / `contract` 的实现；`contract` 为纯接口，不含实现。
 
 ## 5. 验收口径（单一事实来源）
 
@@ -68,8 +80,13 @@ DroneController
 - **内置 selfTest**：各模块保留 `selfTest()`，可在真机 / Node / CI 直接验收，无需框架。
 - **无头仿真**：`sim/sim_flight.ts` 用 `MockPerception` 演示"无感知撞墙 vs 感知驱动急停"。
 
-## 7. 后续里程碑
+## 7. 里程碑
 
-- M2：被原 App 以"源码依赖"方式接入，替换内联阈值，验证零回归。
-- M3：联合仿真（物理交给引擎，本仓负责决策 / 契约）。
-- M4：向上游 `openharmony-robot/uav` 贡献，按 SIG 流程合入。
+| 阶段 | 交付件 | 状态 |
+| --- | --- | --- |
+| M1 建仓与规范 | 独立仓库 / Apache-2.0 / OWNERS / DCO / CI | ✅ 完成 |
+| M2 能力剥离与重构 | `core`/`model`/`avoidance`/`telemetry`/`contract` 五模块 + 单测 + 仿真黄金用例入 CI | ✅ 完成（本版） |
+| M3 仿真方案与文档 | 脚本化仿真方案、场景示例、接入指南（含对接 Simulator SIG） | ⏳ 待办 |
+| M4 毕业准备 | 架构 SIG 毕业评审材料、QA SIG 准出材料 | ⏳ 待办 |
+
+> M2 交付后，原 App 仍以"源码依赖"方式接入本仓（见 `README.md` 接入说明），替换内联阈值以验证零回归；这是 M2 的回归验证手段，不改变本仓作为独立算法库的定位。

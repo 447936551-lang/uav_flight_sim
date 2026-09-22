@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { selfTest as collisionSelfTest } from '../src/core/CollisionDetector';
-import { selfTest as steeringSelfTest } from '../src/core/SteeringBehavior';
-import { DroneController } from '../src/core/DroneController';
-import { selfTest as hudSelfTest } from '../src/core/HudModel';
+import { selfTest as collisionSelfTest } from '../src/avoidance/CollisionDetector';
+import { selfTest as steeringSelfTest } from '../src/avoidance/SteeringBehavior';
+import { DroneController } from '../src/model/DroneController';
+import { selfTest as hudSelfTest } from '../src/telemetry/HudModel';
 
 /**
  * 复用各模块内置的纯函数自检（selfTest）。

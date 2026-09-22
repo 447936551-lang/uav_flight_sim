@@ -39,7 +39,7 @@ import {
   isValidDistance,
   normalize,
 } from './CollisionDetector';
-import { Logger } from './Logger';
+import { Logger } from '../core/Logger';
 
 const TAG: string = 'SteeringBehavior';
 

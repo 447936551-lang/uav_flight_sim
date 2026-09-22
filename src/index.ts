@@ -4,21 +4,26 @@
  * 本文件是库对外公开 API 的 barrel，消费方（OpenHarmony App / 仿真器 /
  * 单元测试）只需 `import { ... } from 'uav_flight_sim'` 即可拿到全部公共类型与函数。
  *
+ * 分层（M2 起按领域切分，自底向上单向依赖）：
+ *   core/        零依赖基础设施（Vec3 / Logger），被所有模块共享；
+ *   model/       飞行动力学状态机（依赖 core）；
+ *   avoidance/   碰撞评估 + 转向力合成（依赖 core）；
+ *   telemetry/   对外可观测状态推导（依赖 core / avoidance）；
+ *   contract/    空间感知输入抽象接口（纯接口，仅依赖 core 的 Vec3 类型）。
+ *
  * 本层**零专有依赖**（不引用 @kit.AREngine / ArkGraphics3D / hilog），
  * 可在 Node、CI、OpenHarmony 三端复用同一份逻辑。
  */
 
-// 数值与向量基础
+// 基础设施：数值与向量、日志
 export { Vec3, vec3, add, sub, scale, length, normalizeVec3, ZERO } from './core/Vec3';
-
-// 自实现日志（替代 hilog）
 export { Logger } from './core/Logger';
 export { LoggerLevel } from './core/LoggerLevel';
 
-// 空间感知抽象接口（"空间感知输入" 契约）
-export { SpatialPerception } from './perception/SpatialPerception';
+// 契约：空间感知输入抽象接口（"空间感知输入" 契约）
+export { SpatialPerception } from './contract/SpatialPerception';
 
-// 物理层：碰撞检测
+// 避障层：碰撞评估 + 几何
 export {
   PhysicsVec3,
   ThreatLevel,
@@ -38,9 +43,9 @@ export {
   isValidDistance,
   evaluate,
   selfTest as collisionSelfTest,
-} from './core/CollisionDetector';
+} from './avoidance/CollisionDetector';
 
-// 物理层：转向 / 避障
+// 避障层：转向力合成 + 速度域避障
 export {
   SteeringParams,
   DEFAULT_STEERING,
@@ -50,30 +55,30 @@ export {
   combineForces,
   applyAvoidance,
   selfTest as steeringSelfTest,
-} from './core/SteeringBehavior';
+} from './avoidance/SteeringBehavior';
 
-// 飞控
+// 模型层：飞控状态机
 export {
   DroneState,
   DRONE_MODEL_SCALE,
   DroneFlightParams,
   DEFAULT_FLIGHT_PARAMS,
   DroneController,
-} from './core/DroneController';
+} from './model/DroneController';
 
-// HUD 状态推导
+// 模型层：AR 世界对象（锚定 + 偏移位姿推导）
+export {
+  WorldPose,
+  WorldObjectType,
+  WorldObject,
+  DroneWorldObject,
+} from './model/WorldObject';
+
+// 遥测层：HUD 威胁等级 / 配色 / 文案推导
 export {
   HudThreat,
   HUD_COLOR_SAFE,
   HudState,
   deriveHud,
   selfTest as hudSelfTest,
-} from './core/HudModel';
-
-// AR 世界对象
-export {
-  WorldPose,
-  WorldObjectType,
-  WorldObject,
-  DroneWorldObject,
-} from './core/WorldObject';
+} from './telemetry/HudModel';

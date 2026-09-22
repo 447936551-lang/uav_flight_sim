@@ -22,24 +22,29 @@
 
 ```
 src/
-  core/                 纯算法核心（零专有依赖）
+  core/                 零依赖基础设施
     Vec3.ts             自实现三维向量（替代 ArkGraphics3D.Vec3）
     Logger.ts           自实现日志（替代 hilog）
     LoggerLevel.ts      日志级别
-    CollisionDetector.ts  碰撞 / 威胁评估（Layer 5 物理层）
-    SteeringBehavior.ts   转向 + 避障（Seek/Avoid，速度域集成）
-    DroneController.ts    飞控状态机 + 速度积分
-    HudModel.ts          HUD 威胁等级推导（纯函数）
-    WorldObject.ts       AR 世界对象基类（自实现 Vec3）
-    index.ts            统一导出
-  perception/
-    SpatialPerception.ts  空间感知输入抽象接口（核心契约）
-tests/                 vitest 单测 + 零依赖自检入口
+  model/                飞行动力学状态机
+    DroneController.ts    飞控状态机 + 速度积分 + 姿态推导
+    WorldObject.ts        AR 世界对象基类（锚定 + 偏移位姿）
+  avoidance/            碰撞评估 + 转向力合成
+    CollisionDetector.ts  碰撞 / 威胁评估（纯函数）
+    SteeringBehavior.ts   Seek/Avoid 转向 + 速度域避障
+  telemetry/            对外可观测状态推导
+    HudModel.ts          HUD 威胁等级 / 配色 / 文案（纯函数）
+  contract/             空间感知输入契约
+    SpatialPerception.ts  空间感知输入抽象接口（核心契约，纯接口）
+  index.ts              统一导出（barrel）
+tests/                 vitest 单测 + 零依赖自检 + 仿真黄金用例
 sim/
   sim_flight.ts         无头飞行仿真演示（含 MockPerception）
 docs/
   design.md             设计说明与验收口径
 ```
+
+依赖方向自底向上**单向**：`core` → `model` / `avoidance` → `telemetry`；`contract` 为纯接口。`model` / `avoidance` 是零依赖底层，不得反向依赖上层实现。
 
 ## 快速开始
 
@@ -88,6 +93,15 @@ drone.perception = new MyDepthSampler(); // 接入即生效，飞控代码无需
 | `AVOID_STEER_GAIN` | 1.25 | 横向绕行增益（越近越鼓励横移贴墙滑行） |
 
 避障强度与前进分量缩放**同源**：`fwdScale = (gap − margin) / band`，`avoidStrength = 1 − fwdScale`。因此面板读数与实际刹车力度永远一致，不会出现"显示危险却没刹车"。
+
+## 里程碑
+
+| 阶段 | 交付件 | 状态 |
+| --- | --- | --- |
+| M1 建仓与规范 | 独立仓库 / Apache-2.0 / OWNERS / DCO / CI | ✅ 完成 |
+| M2 能力剥离与重构 | `core`/`model`/`avoidance`/`telemetry`/`contract` 五模块 + 单测 + 仿真黄金用例入 CI | ✅ 完成 |
+| M3 仿真方案与文档 | 脚本化仿真方案、场景示例、接入指南（含对接 Simulator SIG） | ⏳ 待办 |
+| M4 毕业准备 | 架构 SIG 毕业评审材料、QA SIG 准出材料 | ⏳ 待办 |
 
 ## 许可与合规
 

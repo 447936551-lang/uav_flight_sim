@@ -5,8 +5,8 @@ import {
   AVOID_SLOW_BAND_M,
   AVOID_SAFE_DIST_M,
   DRONE_RADIUS_M,
-} from '../src/core/CollisionDetector';
-import { applyAvoidance, DEFAULT_STEERING } from '../src/core/SteeringBehavior';
+} from '../src/avoidance/CollisionDetector';
+import { applyAvoidance, DEFAULT_STEERING } from '../src/avoidance/SteeringBehavior';
 
 describe('碰撞与转向契约', () => {
   it('gap=1.0 落在减速带内，avoidStrength=0.5', () => {

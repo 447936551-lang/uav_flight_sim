@@ -19,7 +19,7 @@
  * 注意：原工程的 Vec3 来自专有套件 @kit.ArkGraphics3D，本仓库改用自实现的
  * src/core/Vec3.ts，使本模块可在 Node / CI 中直接编译与单测。
  */
-import { Vec3 } from './Vec3';
+import { Vec3 } from '../core/Vec3';
 
 /** AR 世界坐标下的一个点（米） */
 export interface WorldPose {

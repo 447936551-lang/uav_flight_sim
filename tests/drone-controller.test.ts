@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { DroneController, DroneState } from '../src/core/DroneController';
-import { SpatialPerception } from '../src/perception/SpatialPerception';
+import { DroneController, DroneState } from '../src/model/DroneController';
+import { SpatialPerception } from '../src/contract/SpatialPerception';
 
 /** 恒定障碍距离的感知实现，用于验证 SpatialPerception 契约接入 */
 class ConstPerception implements SpatialPerception {

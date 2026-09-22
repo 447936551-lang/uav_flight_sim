@@ -20,16 +20,16 @@
  *
  * 数据来源（重要）：前向障碍距离通过 SpatialPerception 抽象接口获取，
  * 使算法层彻底脱离 AREngine / 深度硬件，可被 AR 引擎、离线仿真、真实传感器
- * 三类数据源统一驱动（见 src/perception/SpatialPerception.ts）。
+ * 三类数据源统一驱动（见 src/contract/SpatialPerception.ts）。
  */
 import {
   AvoidResult,
   DEFAULT_STEERING,
   SteeringParams,
   applyAvoidance,
-} from './SteeringBehavior';
-import { Logger } from './Logger';
-import { SpatialPerception } from '../perception/SpatialPerception';
+} from '../avoidance/SteeringBehavior';
+import { Logger } from '../core/Logger';
+import { SpatialPerception } from '../contract/SpatialPerception';
 
 /**
  * 无人机权威状态（Phase 5 显式物理状态机）。

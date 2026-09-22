@@ -17,7 +17,7 @@
  *   因此 evaluate() 里 clearance 只用于**诊断展示**，不参与是否刹停的判定 ——
  *   若用它去扣阈值，等于把余量算两遍，会让无人机提前 0.19m 停下。
  */
-import { Logger } from './Logger';
+import { Logger } from '../core/Logger';
 
 const TAG: string = 'CollisionDetector';
 
