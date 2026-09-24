@@ -135,7 +135,7 @@
 
 | 项 | 原因 |
 | --- | --- |
-| 算法竞技框架（`FlightAlgorithm` 契约与注册表）及依赖它的四个任务算法（APAS 绕障 / 航点 / 返航 / POI 环绕） | 按项目决策：该框架及其算法**暂不纳入本仓** |
+| 算法竞技框架（`FlightAlgorithm` 契约与注册表）及依赖它的四个任务算法（智能绕障 / 航点 / 返航 / POI 环绕） | 按项目决策：该框架及其算法**暂不纳入本仓**；其中「绕障」的**算法本体**已随 0.2.1 以 `bypassMode` 形式并入 `avoidance/SteeringBehavior`，不依赖该框架 |
 | 天气 HTTP 取数（`WeatherService` 的网络部分） | 引入网络依赖，破坏离线确定性 |
 | AREngine 系列（深度采样 / 平面跟踪 / mesh 探测）、`HoldTargetVisual` / `HorizonVisual` | 依赖 `@kit.AREngine` / `@kit.ArkGraphics3D`，属专有套件 |
 | 端侧推理（`AiDevice` / `AiEngine` 等） | 依赖 `@kit.MindSporeLiteKit`，属设备能力层 |
