@@ -141,6 +141,10 @@ class MyWindSource implements EnvironmentPerception {
 
 避障强度与前进分量缩放**同源**：`fwdScale = (gap − margin) / band`，`avoidStrength = 1 − fwdScale`。因此面板读数与实际刹车力度永远一致，不会出现"显示危险却没刹车"。
 
+**规划式绕行**（`bypassMode`，默认 `false`）：用户直推障碍且完全无横移输入时，主动补一个侧向速度绕过去，而不是原地急停。与 `steerGain` 叠加而不冲突——前者只在"完全没有横移"时兜底，后者只放大已有横移。默认关闭即零回归。
+
+**盲态不是安全**：`obstacleDistance === Infinity` 有两种相反成因——前方确实无障，或这一帧防撞根本是盲的。`deriveHud()` 因此要求必传 `depthTrustworthy`，不可信时判 `Blind`（距离显示 `—`、配色刻意不用绿色）。否则"避障已失效"会被渲染成"∞ 安全"，用户无从察觉。
+
 ## 里程碑
 
 | 阶段 | 交付件 | 状态 |

@@ -184,6 +184,8 @@ export {
 export {
   HudThreat,
   HUD_COLOR_SAFE,
+  HUD_COLOR_BLIND,
+  HUD_COLOR_FALLBACK,
   HudState,
   deriveHud,
   selfTest as hudSelfTest,

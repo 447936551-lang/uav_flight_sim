@@ -37,11 +37,20 @@ import {
   clamp01,
   evaluate,
   isValidDistance,
-  normalize,
+  normalize
 } from './CollisionDetector';
 import { Logger } from '../core/Logger';
 
 const TAG: string = 'SteeringBehavior';
+
+/**
+ * 规划式绕行增益：障碍越近、主动侧向绕行速度越大（仅 bypassMode 生效）。
+ *
+ * 命名说明：业界同类能力常以某厂商的注册商标缩写指代，而本仓库以 Apache-2.0
+ * 公开分发并拟送 SIG 评审，故一律使用中性名称「bypass / 规划式绕行」。
+ * 仅为命名取舍，算法语义与数值行为不受影响。
+ */
+const BYPASS_STEER_GAIN: number = 1.2;
 
 /** 转向/避障参数（可整体替换，便于调参与单测） */
 export interface SteeringParams {
@@ -66,7 +75,7 @@ export const DEFAULT_STEERING: SteeringParams = {
   band: AVOID_SLOW_BAND_M,
   maxForce: AVOID_MAX_FORCE,
   maxSpeed: 1.5,
-  steerGain: AVOID_STEER_GAIN,
+  steerGain: AVOID_STEER_GAIN
 };
 
 /**
@@ -78,7 +87,7 @@ export function seekForce(desired: PhysicsVec3, current: PhysicsVec3,
   const diff: PhysicsVec3 = {
     x: desired.x - current.x,
     y: desired.y - current.y,
-    z: desired.z - current.z,
+    z: desired.z - current.z
   };
   const dir: PhysicsVec3 = normalize(diff);
   return { x: dir.x * maxForce, y: dir.y * maxForce, z: dir.z * maxForce };
@@ -99,7 +108,7 @@ export function avoidForce(distance: number, safeDist: number, away: PhysicsVec3
   return {
     x: dir.x * strength * maxForce,
     y: dir.y * strength * maxForce,
-    z: dir.z * strength * maxForce,
+    z: dir.z * strength * maxForce
   };
 }
 
@@ -155,16 +164,19 @@ export interface AvoidResult {
  * @param forwardX  机头前向单位向量 X
  * @param forwardZ  机头前向单位向量 Z
  * @param distance  前向净距（m）；Infinity/NaN 表示测距不可用 → 不做避障
+ * @param params    转向/避障参数（阈值必须透传给 evaluate，否则调参无效）
+ * @param bypassMode 是否启用规划式绕行：用户直推障碍且无横移输入时，
+ *                  主动补一个侧向速度绕过去，而不是原地急停。默认 false（零回归）。
  */
 export function applyAvoidance(desiredVX: number, desiredVZ: number,
   forwardX: number, forwardZ: number, distance: number,
-  params: SteeringParams = DEFAULT_STEERING): AvoidResult {
+  params: SteeringParams = DEFAULT_STEERING, bypassMode: boolean = false): AvoidResult {
   // 测距不可用（∞ / NaN / ≤0）时不做任何限制：
   // 那是「防撞是盲的」，不是「前方安全」—— 强行限制只会让无人机僵住。
   if (!isValidDistance(distance)) {
     return {
       vx: desiredVX, vz: desiredVZ, braking: false, emergency: false,
-      avoidStrength: 0, threatLevel: 'safe', steering: false,
+      avoidStrength: 0, threatLevel: 'safe', steering: false
     };
   }
 
@@ -187,6 +199,24 @@ export function applyAvoidance(desiredVX: number, desiredVZ: number,
   latX = latX * gain;
   latZ = latZ * gain;
 
+  // —— 规划式绕行（仅 bypassMode）：用户直推墙且无横移输入时，主动生成
+  // 沿「右向」的侧向速度，使轨迹平滑偏向一侧绕过，而非急停在原地。
+  // 这里在「横向绕行增益」(steerGain) 之后叠加，二者叠加亦不冲突：
+  // steerGain 只放大用户已有的横移；本块在「完全没横移」时也主动给一个侧向分量。
+  if (bypassMode && info.avoidStrength > 0) {
+    const fwdA: number = desiredVX * forwardX + desiredVZ * forwardZ;
+    const latAX: number = desiredVX - fwdA * forwardX;
+    const latAZ: number = desiredVZ - fwdA * forwardZ;
+    const hasLatA: boolean = Math.abs(latAX) > 1e-6 || Math.abs(latAZ) > 1e-6;
+    if (fwdA > 0 && !hasLatA) {
+      const rxA: number = -forwardZ;   // 右向 = 前向逆时针转 90°
+      const rzA: number = forwardX;
+      const steer: number = fwdA * info.avoidStrength * BYPASS_STEER_GAIN;
+      latX += rxA * steer;
+      latZ += rzA * steer;
+    }
+  }
+
   let vx: number = latX + fwd * fwdScale * forwardX;
   let vz: number = latZ + fwd * fwdScale * forwardZ;
 
@@ -204,12 +234,12 @@ export function applyAvoidance(desiredVX: number, desiredVZ: number,
     emergency: info.emergency,
     avoidStrength: info.avoidStrength,
     threatLevel: info.threatLevel,
-    steering: steering,
+    steering: steering
   };
 }
 
 /**
- * 纯函数自检（真机 / Node / CI 可直接验收）。
+ * 纯函数自检（真机 hilog 可直接 grep 验收）。
  * 覆盖 PRD 力模型与速度域集成的关键性质。
  */
 export function selfTest(): string {
@@ -276,7 +306,7 @@ export function selfTest(): string {
   // 而不是被忽略（这类"改了没反应"的问题在真机上极难定位）
   const narrow: SteeringParams = {
     safeDist: 0.9, emergencyDist: 0.4, band: 0.5,
-    maxForce: P.maxForce, maxSpeed: P.maxSpeed, steerGain: P.steerGain,
+    maxForce: P.maxForce, maxSpeed: P.maxSpeed, steerGain: P.steerGain
   };
   const rNarrow = applyAvoidance(0, fwdDesiredVZ, FX, FZ, 1.0, narrow);
   check('自定义参数透传生效', !rNarrow.braking && Math.abs(rNarrow.vz - fwdDesiredVZ) < 1e-9);
