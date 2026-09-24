@@ -44,11 +44,14 @@ DroneController
 
 ```
 src/
-├── core/        零依赖基础设施：Vec3 / Logger / LoggerLevel
-├── model/       飞行动力学状态机：DroneController / WorldObject
-├── avoidance/   碰撞评估 + 转向力合成：CollisionDetector / SteeringBehavior
-├── telemetry/   对外可观测状态推导：HudModel
-└── contract/    空间感知输入抽象接口：SpatialPerception
+├── core/          零依赖基础设施：Vec3 / Logger / LoggerLevel
+├── model/         飞行动力学状态机（运动学内核）：DroneController / WorldObject
+├── avoidance/     碰撞评估 + 转向力合成：CollisionDetector / SteeringBehavior
+├── dynamics/      真实刚体动力学：RotorMixer / FlightDynamics / CascadeController
+├── planning/      占用栅格 + 路径规划：PathPlanner / MeshGrid
+├── environment/   大气换算 + 天气归一化：Atmosphere / WeatherCode
+├── telemetry/     对外可观测状态推导：HudModel
+└── contract/      输入契约：SpatialPerception / EnvironmentPerception
 ```
 
 自底向上**单向依赖**（禁止反向 import）：
@@ -56,12 +59,24 @@ src/
 | 模块 | 依赖 | 职责 |
 | --- | --- | --- |
 | `core` | 无 | 数值 / 向量 / 日志原语，被所有模块共享 |
-| `model` | `core` | 状态机 + 速度积分 + 姿态推导；锚定 + 偏移位姿推导 |
+| `model` | `core` | 状态机 + 速度积分 + 姿态推导；锚定 + 偏移位姿推导（**运动学**内核） |
 | `avoidance` | `core` | 碰撞评估、转向避障（纯函数） |
+| `dynamics` | `core` | 混控 / 执行器饱和 / 刚体积分 / 级联控制（**真实动力学**内核） |
+| `planning` | `core`, `avoidance` | 占用栅格构建、A\* 规划、可见性平滑、mesh 栅格化 |
+| `environment` | `core` | 风矢量 / 空气密度 / 平滑阵风 / 天气单位归一化 |
 | `telemetry` | `core`, `avoidance` | 威胁等级 / 配色 / 文案（纯函数） |
-| `contract` | `core`（仅 `Vec3` 类型） | 算法与数据源的唯一边界 |
+| `contract` | `core`（仅 `Vec3` 类型） | 算法与数据源的唯一边界（**纯接口，不含实现**） |
 
-> 纪律：`model` / `avoidance` 为零依赖底层（只依赖 `core`），不得反向依赖 `telemetry` / `contract` 的实现；`contract` 为纯接口，不含实现。
+> 纪律：`model` / `avoidance` / `dynamics` 为零依赖底层（只依赖 `core`），
+> 不得反向依赖 `telemetry` / `contract` 的实现；`contract` 为纯接口。
+>
+> **两套内核并存**：`model`（运动学）与 `dynamics`（刚体）是**并列的可选内核**，
+> 不是替换关系。切换由调用方决定，默认仍走运动学路径 —— 这保证既有真机验证过的
+> 手感与刹停表现（gap≈0.38m）**零回归**。
+
+> **网络依赖纪律**：任何 HTTP / 设备传感器取数**不得进库**。
+> 天气数据只保留纯换算（`environment/`），取数与刷新由 App 侧实现 `EnvironmentPerception` 注入。
+> 违反此条会让 CI 失去离线确定性与可复现性。
 
 ## 5. 验收口径（单一事实来源）
 
@@ -85,7 +100,8 @@ src/
 | 阶段 | 交付件 | 状态 |
 | --- | --- | --- |
 | M1 建仓与规范 | 独立仓库 / Apache-2.0 / OWNERS / DCO / CI | ✅ 完成 |
-| M2 能力剥离与重构 | `core`/`model`/`avoidance`/`telemetry`/`contract` 五模块 + 单测 + 仿真黄金用例入 CI | ✅ 完成（本版） |
+| M2 能力剥离与重构 | `core`/`model`/`avoidance`/`telemetry`/`contract` 五模块 + 单测 + 仿真黄金用例入 CI | ✅ 完成 |
+| M2+ 第二批剥离 | `dynamics` / `planning` / `environment` 三模块 + `EnvironmentPerception` 契约 | ✅ 完成（v0.2.0） |
 | M3 仿真方案与文档 | 脚本化仿真方案、场景示例、接入指南（含对接 Simulator SIG） | ⏳ 待办 |
 | M4 毕业准备 | 架构 SIG 毕业评审材料、QA SIG 准出材料 | ⏳ 待办 |
 

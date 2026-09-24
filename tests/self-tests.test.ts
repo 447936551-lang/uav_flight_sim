@@ -3,6 +3,13 @@ import { selfTest as collisionSelfTest } from '../src/avoidance/CollisionDetecto
 import { selfTest as steeringSelfTest } from '../src/avoidance/SteeringBehavior';
 import { DroneController } from '../src/model/DroneController';
 import { selfTest as hudSelfTest } from '../src/telemetry/HudModel';
+import { selfTest as rotorMixerSelfTest, RotorPlant } from '../src/dynamics/RotorMixer';
+import { FlightDynamics } from '../src/dynamics/FlightDynamics';
+import { selfTest as cascadeSelfTest } from '../src/dynamics/CascadeController';
+import { selfTest as pathPlannerSelfTest } from '../src/planning/PathPlanner';
+import { selfTest as meshGridSelfTest } from '../src/planning/MeshGrid';
+import { selfTest as atmosphereSelfTest } from '../src/environment/Atmosphere';
+import { selfTest as weatherCodeSelfTest } from '../src/environment/WeatherCode';
 
 /**
  * 复用各模块内置的纯函数自检（selfTest）。
@@ -23,5 +30,43 @@ describe('in-code selfTest (collision/steering/drone/hud)', () => {
 
   it('HudModel.selfTest 不抛错', () => {
     expect(() => hudSelfTest()).not.toThrow();
+  });
+});
+
+describe('in-code selfTest (dynamics)', () => {
+  it('RotorMixer.selfTest 不抛错', () => {
+    expect(() => rotorMixerSelfTest()).not.toThrow();
+  });
+
+  it('RotorPlant.selfTest 不抛错', () => {
+    expect(() => RotorPlant.selfTest()).not.toThrow();
+  });
+
+  it('FlightDynamics.selfTest 不抛错', () => {
+    expect(() => FlightDynamics.selfTest()).not.toThrow();
+  });
+
+  it('CascadeController.selfTest 不抛错', () => {
+    expect(() => cascadeSelfTest()).not.toThrow();
+  });
+});
+
+describe('in-code selfTest (planning)', () => {
+  it('PathPlanner.selfTest 不抛错', () => {
+    expect(() => pathPlannerSelfTest()).not.toThrow();
+  });
+
+  it('MeshGrid.selfTest 不抛错', () => {
+    expect(() => meshGridSelfTest()).not.toThrow();
+  });
+});
+
+describe('in-code selfTest (environment)', () => {
+  it('Atmosphere.selfTest 不抛错', () => {
+    expect(() => atmosphereSelfTest()).not.toThrow();
+  });
+
+  it('WeatherCode.selfTest 不抛错', () => {
+    expect(() => weatherCodeSelfTest()).not.toThrow();
   });
 });

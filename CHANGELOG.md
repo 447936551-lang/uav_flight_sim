@@ -1,0 +1,92 @@
+# 更新日志
+
+本项目采用 [语义化版本](https://semver.org/lang/zh-CN/)。所有条目均标注来源模块与验证方式。
+
+---
+
+## [0.2.0] — 2026-09-24
+
+从 ARDroneHarmony（AR 无人机 App）**第二批剥离**：在既有「飞控 + 避障」之上，
+补齐**真实刚体动力学**、**路径规划**与**环境感知**三块能力，并新增第二个输入契约。
+
+> 本次迁移**零逻辑改动**：各文件的公式、常量、阈值与内置 `selfTest` 均原样搬运，
+> 只改写 import 路径。因此既有飞行手感、刹停表现与全部黄金用例数值**无回归**
+> （`tsc` + 52 项单测 + 无头仿真 + DCO 门禁全绿）。
+
+### Added（新增）
+
+**`src/dynamics/` — 真实刚体飞行动力学**（依赖 `core`）
+
+| 文件 | 行数 | 内容 |
+| --- | --- | --- |
+| `RotorMixer.ts` | 420 | 四旋翼混控（Walsh–Hadamard，正交可逆）+ 执行器饱和 + `RotorPlant` 电机一阶滞后与每桨差动 |
+| `FlightDynamics.ts` | 320 | 刚体动力学积分器（半隐式欧拉）；阻力基于**相对气流**而非绝对速度 |
+| `CascadeController.ts` | 219 | 级联控制纯函数：位置环 / 速度环 / 推力矢量解算 / 倾角反解 / 姿态 PD / 阻力前馈 |
+
+关键设计：**执行器饱和做在转速上**（真实上限是 RPM 不是推力），且饱和后机身受到的
+力矩由**实际**推力反解 —— 即"物理诚实"：控制器想要多少不重要，电机真给得出多少才算数。
+
+**`src/planning/` — 占用栅格与路径规划**（依赖 `core` / `avoidance`）
+
+| 文件 | 行数 | 内容 |
+| --- | --- | --- |
+| `PathPlanner.ts` | 1022 | 世界平面 → 2.5D 占用栅格 → A\*（含对角穿角防护、起终点就近吸附）→ 可见性平滑 |
+| `MeshGrid.ts` | 569 | 场景 mesh → 占用栅格，作为平面栅格的**替代数据源**（规划器一行不改） |
+
+关键设计：MeshGrid 把「FREE / OCCUPIED」分别栅格化到两张临时掩膜，最后按
+`OCCUPIED > FREE > UNKNOWN` 统一合成 —— 合成结果与遍历顺序无关，**可复现**。
+
+**`src/environment/` — 大气换算与天气归一化**（依赖 `core`）
+
+| 文件 | 行数 | 内容 |
+| --- | --- | --- |
+| `Atmosphere.ts` | ~230 | 气象风向 → 风矢量、气压/气温 → 空气密度因子、低通平滑、阵风扰动 |
+| `WeatherCode.ts` | ~180 | 风速单位折算、异常值防护、WMO 天气代码中文化 |
+
+关键设计：**网络取数不入库**。天气数据来自 HTTP 接口（带时延、会失败、单位随服务商变化），
+放进算法库会直接破坏「CI 可离线、确定性」的定位。因此只保留纯换算，
+取数/定时刷新/写回控制器留在 App 侧。
+
+**`src/contract/EnvironmentPerception.ts` — 第二个输入契约**
+
+与 `SpatialPerception` 同一套设计思路的第二个实例：前者回答「前方多远有障碍」（几何），
+后者回答「周围空气什么状态」（大气）。算法层只声明需要什么，不关心数据从哪来。
+
+### Changed（变更）
+
+- `src/index.ts`：barrel 扩容，新增 3 个模块与第二个契约的全部公开导出（同名 `selfTest` 逐个别名化）
+- `tests/run-self-tests.ts`：零依赖自检入口纳入 8 个新自检（原 4 → 现 12 个模块）
+- `tests/self-tests.test.ts`：新增 dynamics / planning / environment 三个 describe 块
+- `tests/dynamics-planning-environment.test.ts`（新）：25 项**行为**测试，不只跑 `selfTest`
+
+### Verified（验证）
+
+| 项 | 结果 |
+| --- | --- |
+| `tsc --noEmit` | ✅ 通过 |
+| `vitest run` | ✅ **52 passed**（原 19，新增 33） |
+| `npm run selfcheck` | ✅ 12 个模块自检全通过 |
+| 无头仿真黄金用例 | ✅ 盲飞 `−21.67m` / 感知驱动 `0.40m`（**数值未变，零回归**） |
+| DCO 校验 | ✅ 通过 |
+
+### Not included（本次**故意不入库**的部分）
+
+| 项 | 原因 |
+| --- | --- |
+| 算法竞技框架（`FlightAlgorithm` 契约与注册表）及依赖它的四个任务算法（APAS 绕障 / 航点 / 返航 / POI 环绕） | 按项目决策：该框架及其算法**暂不纳入本仓** |
+| 天气 HTTP 取数（`WeatherService` 的网络部分） | 引入网络依赖，破坏离线确定性 |
+| AREngine 系列（深度采样 / 平面跟踪 / mesh 探测）、`HoldTargetVisual` / `HorizonVisual` | 依赖 `@kit.AREngine` / `@kit.ArkGraphics3D`，属专有套件 |
+| 端侧推理（`AiDevice` / `AiEngine` 等） | 依赖 `@kit.MindSporeLiteKit`，属设备能力层 |
+| `AlertService`（振动 / 提示音告警） | 依赖 `@kit.SensorServiceKit` / `AudioKit` / `MediaKit`，属 UI 反馈层 |
+
+---
+
+## [0.1.0] — 2026-09-22
+
+首个可交付版本（M1 + M2）。
+
+- **M1 建仓与规范**：Apache-2.0 LICENSE、OWNERS、DCO 检查（`scripts/check-dco.mjs` + `commit-msg` hook）、CI 门禁
+- **M2 能力剥离与重构**：扁平 `src/core` 按领域重切为 `core` / `model` / `avoidance` / `telemetry` / `contract` 五模块，自底向上单向依赖
+- 核心算法：飞控状态机（`DroneController`）、转向避障（`SteeringBehavior`）、碰撞评估（`CollisionDetector`）、HUD 威胁推导（`HudModel`）、世界对象（`WorldObject`），自实现 `Vec3` / `Logger` 替代 `ArkGraphics3D` / `hilog`
+- 验证：16 项单测 + 仿真黄金用例入 CI（`−21.67m` 盲飞穿墙 vs `0.40m` 硬停面急停）
+- 依赖：vitest 升级至 5.0.1，清除 dev 依赖漏洞链（5 → 0）

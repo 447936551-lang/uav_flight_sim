@@ -1,6 +1,6 @@
 {
   "name": "uav_flight_sim",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "无人机飞行仿真纯算法层（零专有依赖，可在 CI / 离线仿真 / OpenHarmony 三方复用）",
   "license": "Apache-2.0",
   "main": "dist/index.js",

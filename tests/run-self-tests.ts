@@ -6,6 +6,13 @@ import { selfTest as collisionSelfTest } from '../src/avoidance/CollisionDetecto
 import { selfTest as steeringSelfTest } from '../src/avoidance/SteeringBehavior';
 import { DroneController } from '../src/model/DroneController';
 import { selfTest as hudSelfTest } from '../src/telemetry/HudModel';
+import { selfTest as rotorMixerSelfTest, RotorPlant } from '../src/dynamics/RotorMixer';
+import { FlightDynamics } from '../src/dynamics/FlightDynamics';
+import { selfTest as cascadeSelfTest } from '../src/dynamics/CascadeController';
+import { selfTest as pathPlannerSelfTest } from '../src/planning/PathPlanner';
+import { selfTest as meshGridSelfTest } from '../src/planning/MeshGrid';
+import { selfTest as atmosphereSelfTest } from '../src/environment/Atmosphere';
+import { selfTest as weatherCodeSelfTest } from '../src/environment/WeatherCode';
 
 let failed = false;
 function run(name: string, fn: () => void | string): void {
@@ -21,6 +28,7 @@ function run(name: string, fn: () => void | string): void {
   }
 }
 
+// ── 既有模块 ────────────────────────────────────────────────────
 run('CollisionDetector', () => collisionSelfTest());
 run('SteeringBehavior', () => steeringSelfTest());
 run('DroneController', () => {
@@ -29,6 +37,24 @@ run('DroneController', () => {
 run('HudModel', () => {
   hudSelfTest();
 });
+
+// ── 动力学层 ────────────────────────────────────────────────────
+run('RotorMixer', () => rotorMixerSelfTest());
+run('RotorPlant', () => {
+  RotorPlant.selfTest();
+});
+run('FlightDynamics', () => {
+  FlightDynamics.selfTest();
+});
+run('CascadeController', () => cascadeSelfTest());
+
+// ── 规划层 ──────────────────────────────────────────────────────
+run('PathPlanner', () => pathPlannerSelfTest());
+run('MeshGrid', () => meshGridSelfTest());
+
+// ── 环境层 ──────────────────────────────────────────────────────
+run('Atmosphere', () => atmosphereSelfTest());
+run('WeatherCode', () => weatherCodeSelfTest());
 
 if (failed) {
   process.exit(1);
