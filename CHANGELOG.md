@@ -54,17 +54,24 @@
 
 ### Changed（变更）
 
+- `src/model/DroneController.ts`：新增**可选**环境输入（`environment` / `environmentActive` /
+  `windVelX/Z` / `windAccelX/Z` / `airDensityFactor`）与 `setEnvironment()`，
+  使 `EnvironmentPerception` 契约被真正消费，而不是一个装饰性接口。
+  默认关闭 ⇒ **零回归**（已由单测逐位对比钉死：不接环境 / 接入但关闭，
+  与旧行为输出完全一致）
 - `src/index.ts`：barrel 扩容，新增 3 个模块与第二个契约的全部公开导出（同名 `selfTest` 逐个别名化）
 - `tests/run-self-tests.ts`：零依赖自检入口纳入 8 个新自检（原 4 → 现 12 个模块）
 - `tests/self-tests.test.ts`：新增 dynamics / planning / environment 三个 describe 块
 - `tests/dynamics-planning-environment.test.ts`（新）：25 项**行为**测试，不只跑 `selfTest`
+- `tests/environment-integration.test.ts`（新）：7 项契约接入测试，
+  核心是「不接环境 / 接入但关闭 ⇒ 与旧行为**逐位一致**」的零回归守护
 
 ### Verified（验证）
 
 | 项 | 结果 |
 | --- | --- |
 | `tsc --noEmit` | ✅ 通过 |
-| `vitest run` | ✅ **52 passed**（原 19，新增 33） |
+| `vitest run` | ✅ **59 passed**（原 19，新增 40） |
 | `npm run selfcheck` | ✅ 12 个模块自检全通过 |
 | 无头仿真黄金用例 | ✅ 盲飞 `−21.67m` / 感知驱动 `0.40m`（**数值未变，零回归**） |
 | DCO 校验 | ✅ 通过 |

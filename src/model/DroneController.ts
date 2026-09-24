@@ -29,7 +29,10 @@ import {
   applyAvoidance,
 } from '../avoidance/SteeringBehavior';
 import { Logger } from '../core/Logger';
+import { Vec3 } from '../core/Vec3';
 import { SpatialPerception } from '../contract/SpatialPerception';
+import { EnvironmentPerception } from '../contract/EnvironmentPerception';
+import { WIND_GAIN } from '../environment/Atmosphere';
 
 /**
  * 无人机权威状态（Phase 5 显式物理状态机）。
@@ -244,6 +247,27 @@ export class DroneController {
   public perception: SpatialPerception | null = null;
 
   /**
+   * 环境感知输入（"环境感知输入" 契约，第二个契约）。
+   * 与 SpatialPerception 同构：设置后 update() 每帧通过它读取风场与空气密度；
+   * 未设置或 `environmentActive = false` 时**完全不参与计算** ——
+   * 这是"零回归"的硬保证：不接环境 = 与旧行为逐位一致。
+   */
+  public environment: EnvironmentPerception | null = null;
+
+  /** 环境感知开关（默认关）。关闭时风场与密度恒为无风标准值。 */
+  public environmentActive: boolean = false;
+  /** 风→等效加速度增益（m/s² 每 m/s 风速），与 environment/Atmosphere 同源 */
+  public windGain: number = WIND_GAIN;
+  /** 环境风速矢量（m/s，AR 世界系），由环境层每帧写入；动力学内核据此算相对气流 */
+  public windVelX: number = 0;
+  public windVelZ: number = 0;
+  /** 风等效加速度（m/s²，AR 世界系），本运动学内核消费 */
+  public windAccelX: number = 0;
+  public windAccelZ: number = 0;
+  /** 空气密度相对因子（标准海平面 = 1.0） */
+  public airDensityFactor: number = 1.0;
+
+  /**
    * 机头前方最近障碍距离（米），由 SpatialPerception 每帧写入；
    * Infinity 表示前方无障碍（或深度不可用）。飞控据此限制前进分量。
    * 当 perception 为 null 时，由调用方直接赋值（单测 / 仿真场景）。
@@ -327,6 +351,23 @@ export class DroneController {
   /** 是否正在软降落（Landing 态），供诊断 / 测试读取 */
   public get isLanding(): boolean {
     return this.landing;
+  }
+
+  /**
+   * 接入 / 摘除环境感知。
+   * 传入 null 即断开，并**立即把风场与密度复位为无风标准值** ——
+   * 避免"断开后残留上一帧的风"这类隐蔽 bug。
+   */
+  public setEnvironment(env: EnvironmentPerception | null): void {
+    this.environment = env;
+    if (env === null) {
+      this.windVelX = 0;
+      this.windVelZ = 0;
+      this.windAccelX = 0;
+      this.windAccelZ = 0;
+      this.airDensityFactor = 1.0;
+      this.environmentActive = false;
+    }
   }
 
   /** 起飞 / 降落 切换 */
@@ -476,6 +517,28 @@ export class DroneController {
     } else {
       this.velY *= decayFactor(p.damping, dt);
     }
+
+    // —— 环境风场：由 EnvironmentPerception（第二个契约）每帧读入 ——
+    // 未接入或关闭时，风场与密度一律归零 —— 对运动学**零影响**，
+    // 与未引入环境层之前的行为逐位一致（零回归的硬保证）。
+    if (active && this.environmentActive && this.environment !== null) {
+      const w: Vec3 | null = this.environment.getWindVelocity();
+      this.windVelX = w !== null ? w.x : 0;
+      this.windVelZ = w !== null ? w.z : 0;
+      if (this.environment.getAirDensity !== undefined) {
+        this.airDensityFactor = this.environment.getAirDensity();
+      }
+    } else {
+      this.windVelX = 0;
+      this.windVelZ = 0;
+      this.airDensityFactor = 1.0;
+    }
+    // 风速矢量 → 等效加速度扰动（运动学内核的权宜口径；
+    // 动力学内核直接用 windVel 算相对气流阻力，不走这里）
+    this.windAccelX = this.windVelX * this.windGain;
+    this.windAccelZ = this.windVelZ * this.windGain;
+    this.velX += this.windAccelX * dt;
+    this.velZ += this.windAccelZ * dt;
 
     // —— 位置积分 ——
     if (active) {
