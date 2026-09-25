@@ -2,7 +2,7 @@
 
 ## 1. 背景与目标
 
-ARDroneHarmony 是一套基于 `@kit.AREngine` 的 AR 无人机 App。其飞控与避障逻辑质量较高，但强耦合于 OpenHarmony 专有套件，无法在普通开发机 / CI 中编译与单测，也难以被社区复用。
+ARDroneHarmony 是一套基于 `@kit.AREngine` 的 AR 无人机 App（作者自有项目，与任何第三方厂商及其产品商标无关联）。其飞控与避障逻辑质量较高，但强耦合于 OpenHarmony 专有套件，无法在普通开发机 / CI 中编译与单测，也难以被社区复用。源码溯源与取舍对照见 [`extraction-map.md`](./extraction-map.md)。
 
 本仓库目标：**把可独立验证的算法子集剥离成零专有依赖的纯逻辑层**，作为向 OpenHarmony **UAV SIG** 孵化的第一步（里程碑 M1）；M2 起按领域拆分为 `core` / `model` / `avoidance` / `telemetry` / `contract` 五个模块。
 
