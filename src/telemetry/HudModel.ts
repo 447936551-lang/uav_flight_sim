@@ -18,6 +18,12 @@
  *   - Blind   ：测距链路没有可信读数（depthTrustworthy === false）。
  *   - Safe    ：其余（有限距离 且 distance >= 1.6m）。
  *
+ * 【除等级外，还有两条正交的「不是安全」通道】——它们都**只**改写文案/配色/距离呈现，
+ * 不参与等级判定，因此既不改变飞行行为，也不产生额外响铃：
+ *   - degraded（相机代测）：量的地方不对（手机前方 ≠ 无人机前方）。
+ *   - suppressed（前方不可判）：量对了，但所有前方命中都被自己的几何判据剔除了
+ *     —— ∞ 在这里不是「畅通」，而是「没得出任何结论」。
+ *
  * 【Blind 为什么必须独立存在（本文件最重要的一处修正）】
  *   DroneController.obstacleDistance === Infinity 有**两种完全相反**的成因：
  *     (a) 前方确实没有障碍（探测正常，只是都没命中）→ 真的安全；
@@ -94,6 +100,15 @@ export interface HudState {
    * 为真时 label 固定为「相机代测」：量到的是手机前方的净距，不是无人机前方的。
    */
   degraded: boolean;
+  /**
+   * 本帧是否属于「有读数、但所有前方命中都被几何判据剔除」的抑制态。
+   * 为真时 label 固定为「前方不可判」、距离不报数（"—"）。
+   *
+   * 与 degraded 的区别：degraded 是「量的地方不对」（相机代测），
+   * suppressed 是「量的地方对、但结论被自己的剔除规则吃掉了」。
+   * 两者都必须与「安全」区分开，这是 2026-09-25 真机「贴近障碍仍显示安全」的收口。
+   */
+  suppressed: boolean;
 }
 
 /**
@@ -111,10 +126,25 @@ export interface HudState {
  *                        不是无人机前方的；照旧显示成「安全」就是又一次面板说谎。
  *                        该距离已在采样器侧按 CAM_FALLBACK_AUTH_CAP 封顶（≥1.0m），
  *                        因此这里最重只会落到 Caution，绝不可能出现「危险」。
+ * @param suppressed      本帧是否属于「有可信读数、但所有前方命中都被几何判据剔除」。
+ *                        ---------------------------------------------------------------
+ *                        这是 2026-09-25 真机缺陷（无人机贴着杂物堆/柜体，HUD 仍是绿「∞
+ *                        安全」）的收口，与 Blind 是**同一个病根的第二支**：
+ *                        obstacleDistance === Infinity 原本有三种成因，
+ *                          (a) 前方确实 3m 内无遮挡（探测正常）      → 真的安全
+ *                          (b) 这一帧防撞是盲的                      → Blind（已有）
+ *                          (c) 测到了，但命中全被支撑面/走廊/可飞越剔掉 → 什么结论都没有
+ *                        (c) 曾被并进 (a) —— 于是「自己把障碍丢掉」被渲染成「安全」。
+ *                        采样器以「在走廊内、不在机体下方、在探针量程内，却仅因
+ *                        支撑面判据被丢弃」的命中数 > 0 给出判据，本模块不重新推导。
+ *                        为真时距离不报数（"—"）并用「不知道」的中性灰：
+ *                        ∞ 是「没结论」，渲染成一个具体读数同样是失真。
+ *                        **不改 level**：等级仍完全由物理阈值决定，从而不产生额外响铃。
  * @returns 不可变 HudState 快照
  */
 export function deriveHud(obstacleDistance: number, avoidStrength: number,
-  avoidEmergency: boolean, depthTrustworthy: boolean, degraded: boolean): HudState {
+  avoidEmergency: boolean, depthTrustworthy: boolean, degraded: boolean,
+  suppressed: boolean): HudState {
   // —— 等级判定（与真实刹停对齐）——
   let level: HudThreat = HudThreat.Safe;
   if (avoidEmergency || (isFinite(obstacleDistance) && obstacleDistance < AVOID_MARGIN_M)) {
@@ -131,6 +161,13 @@ export function deriveHud(obstacleDistance: number, avoidStrength: number,
   }
 
   // —— 文案 / 配色（按等级映射，集中映射避免散落）——
+  // 「抑制态」与「代测」都只在**非 Blind / 非 Danger** 时改写文案：
+  //   · Blind 是「连读数都没有」，语义比抑制更强，不能被降级覆盖；
+  //   · Danger 是实测到了硬停面，是既成事实，宁可重复报警也不能被淡化。
+  // 另外抑制态只在**没有数可报**（非有限）时才接管：一旦这帧真有有限读数，
+  // 那就是真实信息，藏起来反而是第二重失真；何况等级已在报警。
+  const suppressedActive: boolean = suppressed && !isFinite(obstacleDistance) &&
+    level !== HudThreat.Blind && level !== HudThreat.Danger;
   let label: string = '安全';
   let colorHex: string = HUD_COLOR_SAFE;
   if (level === HudThreat.Blind) {
@@ -153,11 +190,20 @@ export function deriveHud(obstacleDistance: number, avoidStrength: number,
     label = '相机代测';
     colorHex = HUD_COLOR_FALLBACK;
   }
+  // —— 抑制覆盖：测到了，但结论被自己的剔除规则吃掉了 ——
+  // 放在代测之后：抑制态意味着「本体/相机都测到过东西，却被判据丢弃」，
+  // 比「量的地方不对」更接近事故（可能真有障碍被丢），故优先级更高。
+  // 复用 Blind 的中性灰：两者同属「不知道」，用同一色系表达同一认知状态，
+  // 文案区分成因；刻意不引入新色，避免与三级威胁色（黄/橙/红）抢占语义。
+  if (suppressedActive) {
+    label = '前方不可判';
+    colorHex = HUD_COLOR_BLIND;
+  }
 
-  // 距离文案：盲 → "—"（不报数，避免把「不知道」渲染成一个具体读数）；
+  // 距离文案：盲 / 抑制 → "—"（不报数，避免把「不知道」渲染成一个具体读数）；
   //          有限 → 保留两位小数 + " m"；其余非有限 → "∞"（理论上已不可达，保留兜底）。
   let distanceText: string = '∞';
-  if (level === HudThreat.Blind) {
+  if (level === HudThreat.Blind || suppressedActive) {
     distanceText = '—';
   } else if (isFinite(obstacleDistance)) {
     distanceText = `${obstacleDistance.toFixed(2)} m`;
@@ -168,7 +214,8 @@ export function deriveHud(obstacleDistance: number, avoidStrength: number,
     colorHex: colorHex,
     label: label,
     distanceText: distanceText,
-    degraded: degraded
+    degraded: degraded,
+    suppressed: suppressed
   };
 }
 
@@ -180,6 +227,11 @@ export function deriveHud(obstacleDistance: number, avoidStrength: number,
  *   同一条 obstacleDistance=Infinity，仅凭 depthTrustworthy 一个参数就应给出
  *   两种截然不同的展示（Safe/∞  vs  Blind/—）。
  *   真机现场取到的 2.53m 也一并入断言（那次是正常的 Safe）。
+ *
+ * 2026-09-25 随 suppressed 一起补：把「真安全」与「命中全被剔除」也分开钉死——
+ *   同一条 Infinity + depthTrustworthy=true，仅凭 suppressed 一个参数就应从
+ *   Safe/∞ 变成「前方不可判」/—。反向断言同样重要：suppressed=false 时
+ *   必须仍是 Safe/∞，否则日常「前方 3m 内无遮挡」会被整体误报成不可判。
  */
 export function selfTest(): void {
   const fails: string[] = [];
@@ -191,66 +243,94 @@ export function selfTest(): void {
     }
   };
 
-  // —— 核心：同一 ∞，两种语义 ——
-  const infTrusted = deriveHud(Infinity, 0, false, true, false);
+  // —— 核心：同一 ∞，三种语义（第六参数 suppressed 依次为 false/false/true）——
+  const infTrusted = deriveHud(Infinity, 0, false, true, false, false);
   check('Infinity + 可信 → Safe', infTrusted.level === HudThreat.Safe);
   check('Infinity + 可信 → ∞', infTrusted.distanceText === '∞');
 
-  const infBlind = deriveHud(Infinity, 0, false, false, false);
+  const infBlind = deriveHud(Infinity, 0, false, false, false, false);
   check('Infinity + 不可信 → Blind', infBlind.level === HudThreat.Blind);
   check('Blind → label=测距不可用', infBlind.label === '测距不可用');
   check('Blind → 距离不报数(—)', infBlind.distanceText === '—');
   check('Blind → 不用安全绿', infBlind.colorHex !== HUD_COLOR_SAFE);
 
+  // —— 抑制态：测到了，但命中全被剔除 ——
+  const infSuppressed = deriveHud(Infinity, 0, false, true, false, true);
+  check('Infinity + 可信 + 抑制 → 仍判 Safe（不得产生响铃）',
+    infSuppressed.level === HudThreat.Safe);
+  check('抑制 → label=前方不可判', infSuppressed.label === '前方不可判');
+  check('抑制 → 不得显示安全', infSuppressed.label !== '安全');
+  check('抑制 → 距离不报数(—)', infSuppressed.distanceText === '—');
+  check('抑制 → 不用安全绿', infSuppressed.colorHex !== HUD_COLOR_SAFE);
+  check('抑制 → suppressed 透传', infSuppressed.suppressed === true);
+  // 反向：没有抑制时必须是老实的安全（否则日常畅通会被整体误报）
+  check('无抑制 + Infinity → label=安全', infTrusted.label === '安全');
+  check('无抑制 → suppressed=false', infTrusted.suppressed === false);
+  // 抑制与代测同时为真 → 抑制优先（「判据把障碍丢了」比「量的地方不对」更接近事故）
+  const bothFlags = deriveHud(Infinity, 0, false, true, true, true);
+  check('抑制 + 代测 → label=前方不可判', bothFlags.label === '前方不可判');
+  // 抑制不得盖掉真实读数：有有限距离时照旧报数（藏的才是第二重失真）
+  const suppressedWithReading = deriveHud(0.8, 0.6, false, true, false, true);
+  check('抑制但 0.8m 有限读数 → label=接近',
+    suppressedWithReading.label === '接近' &&
+    suppressedWithReading.distanceText === '0.80 m');
+  // Blind / Danger 优先于抑制
+  const supBlind = deriveHud(Infinity, 0, false, false, false, true);
+  check('不可信 + 抑制标记 → 仍是 Blind', supBlind.level === HudThreat.Blind &&
+    supBlind.label === '测距不可用');
+  const supDanger = deriveHud(0.2, 1.0, false, true, false, true);
+  check('0.2m + 抑制标记 → 仍是危险', supDanger.level === HudThreat.Danger &&
+    supDanger.label === '危险');
+
   // 真机现场值：2.53m 是「测到但超出避障生效距离」，属正常 Safe
-  const realDevice = deriveHud(2.53, 0, false, true, false);
+  const realDevice = deriveHud(2.53, 0, false, true, false, false);
   check('真机 2.53m → Safe', realDevice.level === HudThreat.Safe);
 
   // 盲 + 有限距离也必须是 Blind（例如降级前残留的旧值，不可当成安全）
-  const blindWithStale = deriveHud(2.53, 0, false, false, false);
+  const blindWithStale = deriveHud(2.53, 0, false, false, false, false);
   check('不可信 + 2.53m → Blind（旧值不得冒充安全）', blindWithStale.level === HudThreat.Blind);
 
   // —— 相机代测：有读数，但量的不是无人机前方 ——
   // 采样器侧已把代测距离封顶到 ≥1.0m（只减速不硬停），所以最重只能到 Caution。
-  const fbFar = deriveHud(2.0, 0.1, false, true, true);
+  const fbFar = deriveHud(2.0, 0.1, false, true, true, false);
   check('代测 2.0m → 等级仍按物理阈值(Safe)', fbFar.level === HudThreat.Safe);
   check('代测 2.0m → label=相机代测', fbFar.label === '相机代测');
   check('代测 → 不得显示安全', fbFar.label !== '安全');
   check('代测 → 不用安全绿', fbFar.colorHex !== HUD_COLOR_SAFE);
   check('代测 → 与盲态配色不同', fbFar.colorHex !== HUD_COLOR_BLIND);
   check('代测 → degraded 透传', fbFar.degraded === true);
-  const fbNear = deriveHud(1.0, 0.5, false, true, true);
+  const fbNear = deriveHud(1.0, 0.5, false, true, true, false);
   check('代测封顶 1.0m → 最重只到 Caution', fbNear.level === HudThreat.Caution);
   check('代测 1.0m → label 仍为相机代测', fbNear.label === '相机代测');
   // 代测绝不许冒出「危险」：那是硬停面语义，只有无人机本体实测才配
-  const fbDanger = deriveHud(0.2, 1.0, false, true, true);
+  const fbDanger = deriveHud(0.2, 1.0, false, true, true, false);
   check('代测 0.2m → Danger 但 label 不被改成代测', fbDanger.level === HudThreat.Danger &&
     fbDanger.label === '危险');
   // 盲态优先于代测：什么都没测到时不能显示「相机代测」
-  const fbBlind = deriveHud(Infinity, 0, false, false, true);
+  const fbBlind = deriveHud(Infinity, 0, false, false, true, false);
   check('不可信 + 代标记 → 仍是 Blind', fbBlind.level === HudThreat.Blind &&
     fbBlind.label === '测距不可用');
 
   // —— 急停优先于一切 ——
-  const emergencyBlind = deriveHud(Infinity, 0, true, false, false);
+  const emergencyBlind = deriveHud(Infinity, 0, true, false, false, false);
   check('急停即使测距不可信 → Danger', emergencyBlind.level === HudThreat.Danger);
-  const danger = deriveHud(0.3, 1.0, false, false, false);
+  const danger = deriveHud(0.3, 1.0, false, false, false, false);
   check('0.3m + 不可信 → Danger（实测硬停面优先）', danger.level === HudThreat.Danger);
 
   // —— 原有阈值口径（可信前提下不得回归）——
-  const far = deriveHud(2.0, 0, false, true, false);
+  const far = deriveHud(2.0, 0, false, true, false, false);
   check('2.0m→Safe', far.level === HudThreat.Safe);
 
-  const caution = deriveHud(1.2, 0.3, false, true, false);
+  const caution = deriveHud(1.2, 0.3, false, true, false, false);
   check('1.2m→Caution', caution.level === HudThreat.Caution);
 
-  const warning = deriveHud(0.8, 0.6, false, true, false);
+  const warning = deriveHud(0.8, 0.6, false, true, false, false);
   check('0.8m→Warning', warning.level === HudThreat.Warning);
 
-  const boundary = deriveHud(1.6, 0.1, false, true, false);
+  const boundary = deriveHud(1.6, 0.1, false, true, false, false);
   check('1.6m 边界→Safe', boundary.level === HudThreat.Safe);
 
-  const emergency = deriveHud(1.0, 0.5, true, true, false);
+  const emergency = deriveHud(1.0, 0.5, true, true, false, false);
   check('emergency=true 且 1.0m→Danger', emergency.level === HudThreat.Danger);
 
   check('非代测 → degraded=false', far.degraded === false);
