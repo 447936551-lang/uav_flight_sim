@@ -1,8 +1,8 @@
 # 代码溯源对照表（Extraction Map）
 
-本表记录 `uav_flight_sim` 各模块从作者自有 OpenHarmony 无人机控制 App（项目名 **ARDroneHarmony**）的剥离来源与取舍，供 SIG 毕业评审溯源。
+本表记录 `uav_flight_sim` 各模块从作者自有 OpenHarmony 无人机控制 App（项目名 **AR无人机**）的剥离来源与取舍，供 SIG 毕业评审溯源。
 
-> 商标说明：ARDroneHarmony 为作者自有项目名称，与任何第三方厂商及其产品商标无关联；本仓库不依赖、不引用任何第三方专有 SDK 或商标化能力。
+> 商标说明：AR无人机 为作者自有项目名称，与任何第三方厂商及其产品商标无关联；本仓库不依赖、不引用任何第三方专有 SDK 或商标化能力。
 
 ## 1. 已纳入（Included）
 

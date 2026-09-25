@@ -4,9 +4,9 @@
 
 无人机飞行仿真 **纯算法层** —— 一套零专有依赖（不引用 `@kit.AREngine` / `ArkGraphics3D` / `hilog` / `MindSporeLiteKit`）的飞行控制、转向避障、刚体动力学、路径规划与环境感知逻辑。
 
-> 本仓库是作者自有 OpenHarmony 无人机控制 App（项目名 **ARDroneHarmony**）向 **OpenHarmony UAV SIG** 孵化的算法子集：把可独立验证的"决策 / 物理"逻辑从渲染层剥离，使其能在 **CI / 离线仿真 / 真机** 三端复用同一份代码。
+> 本仓库是作者自有 OpenHarmony 无人机控制 App（项目名 **AR无人机**）向 **OpenHarmony UAV SIG** 孵化的算法子集：把可独立验证的"决策 / 物理"逻辑从渲染层剥离，使其能在 **CI / 离线仿真 / 真机** 三端复用同一份代码。
 
-**来源与商标声明**：ARDroneHarmony 为作者自有项目名称，与任何第三方厂商及其产品商标无关联；本仓库不依赖、不引用任何第三方专有 SDK 或商标化能力。完整溯源见 [`docs/extraction-map.md`](./docs/extraction-map.md)。
+**来源与商标声明**：AR无人机 为作者自有项目名称，与任何第三方厂商及其产品商标无关联；本仓库不依赖、不引用任何第三方专有 SDK 或商标化能力。完整溯源见 [`docs/extraction-map.md`](./docs/extraction-map.md)。
 
 ---
 

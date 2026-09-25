@@ -6,12 +6,12 @@ with **zero proprietary dependencies** (no `@kit.AREngine` / `ArkGraphics3D` / `
 `MindSporeLiteKit`).
 
 > This repository is the algorithm subset extracted from the author's own OpenHarmony
-> drone-control app (project name **ARDroneHarmony**) and incubated into the
+> drone-control app (project name **AR Drone**) and incubated into the
 > **OpenHarmony UAV SIG**: the independently verifiable "decision / physics" logic is
 > peeled away from the rendering layer so the same code can be reused across **CI / offline
 > simulation / real hardware**.
 
-**Source & trademark notice**: ARDroneHarmony is the author's own project name and is not
+**Source & trademark notice**: AR Drone is the author's own project name and is not
 associated with any third-party vendor or its product trademarks. This repository does not
 depend on or reference any third-party proprietary SDK or trademarked capability. For the full
 provenance map, see [`docs/extraction-map.md`](./docs/extraction-map.md).
