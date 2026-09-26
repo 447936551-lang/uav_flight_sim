@@ -194,6 +194,16 @@ as "∞ safe" and the user would never notice.
 > (M1–M4 did not include them). They will be reported as additional deliverables when contributing
 > upstream. See `CHANGELOG.md`.
 
+## Support this project
+
+If this repository helps your project, consider buying the author a coffee ☕:
+
+- [GitHub Sponsors](https://github.com/sponsors/447936551-lang)
+- [Afdian (爱发电)](https://afdian.com/a/your-afdian-id) — recommended for users in China; replace with the author's Afdian page
+
+Sponsorship only supports the open-source work itself; it does not influence the technical
+direction or community governance of this project (Apache-2.0 / DCO apply as usual).
+
 ## License & compliance
 
 - **Apache-2.0** (consistent with the OpenHarmony community); every source header carries copyright and license.

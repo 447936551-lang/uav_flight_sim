@@ -162,6 +162,15 @@ class MyWindSource implements EnvironmentPerception {
 > v0.2.0 属**超出原提案范围**的新增能力（原提案 M1–M4 未含刚体动力学与路径规划）。
 > 向上游贡献时会作为新增交付物一并申报。详见 `CHANGELOG.md`。
 
+## 支持我
+
+如果这个仓库对你的项目有帮助，欢迎请作者喝杯咖啡 ☕：
+
+- [GitHub Sponsors](https://github.com/sponsors/447936551-lang)
+- [爱发电](https://afdian.com/a/your-afdian-id)（国内用户推荐，替换为作者的爱发电主页）
+
+赞助仅代表对开源工作的支持，不影响本项目的技术方向与社区治理（Apache-2.0 / DCO 照常执行）。
+
 ## 许可与合规
 
 - 采用 **Apache-2.0** 许可（与 OpenHarmony 社区一致）；所有源码头已标注版权与许可。
