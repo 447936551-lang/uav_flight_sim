@@ -166,7 +166,9 @@ class MyWindSource implements EnvironmentPerception {
 
 如果这个仓库对你的项目有帮助，欢迎请作者喝杯咖啡 ☕：
 
+<!-- GitHub Sponsors 待开通后启用（收款需居住在支持地区，见 docs）：
 - [GitHub Sponsors](https://github.com/sponsors/447936551-lang)
+-->
 - [爱发电](https://afdian.com/a/uavflightsim)（国内用户推荐）
 
 赞助仅代表对开源工作的支持，不影响本项目的技术方向与社区治理（Apache-2.0 / DCO 照常执行）。

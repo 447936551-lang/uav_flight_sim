@@ -198,7 +198,10 @@ as "∞ safe" and the user would never notice.
 
 If this repository helps your project, consider buying the author a coffee ☕:
 
+<!-- GitHub Sponsors link will be enabled once the account is approved (payout requires
+     residence in a supported region):
 - [GitHub Sponsors](https://github.com/sponsors/447936551-lang)
+-->
 - [Afdian (爱发电)](https://afdian.com/a/uavflightsim) — recommended for users in China
 
 Sponsorship only supports the open-source work itself; it does not influence the technical
