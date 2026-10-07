@@ -467,8 +467,13 @@ export class DroneController {
     if (this.avoidanceEnabled) {
       // maxSpeed 每帧同步：入口页可调最大速度，避障限幅必须跟着变
       this.steering.maxSpeed = p.maxSpeed;
+      // speed 传**当前实际水平速度**：硬停面随速度伸缩（刹车距离约束，
+      // margin(v) = 0.25 + v²/3），与 App 侧运动学内核同口径（2026-10-05 同步）。
+      // bypassMode 显式传 false、横向偏置传 0：库内控制器暂无绕行方位输入，
+      // 保持「未启用绕行」的既有行为（App 侧动力学路径的 bypass 接线归 M3）。
+      const curSpeed: number = Math.sqrt(this.velX * this.velX + this.velZ * this.velZ);
       const av: AvoidResult = applyAvoidance(targetVX, targetVZ, fx, fz,
-        distance, this.steering);
+        distance, this.steering, false, 0, curSpeed);
       targetVX = av.vx;
       targetVZ = av.vz;
       this.avoidStrength = av.avoidStrength;

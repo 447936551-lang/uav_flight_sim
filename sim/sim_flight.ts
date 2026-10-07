@@ -16,6 +16,7 @@ import {
   Vec3,
   vec3,
 } from '../src/index';
+import { AVOID_MARGIN_BASE_M } from '../src/avoidance/CollisionDetector';
 
 /**
  * 模拟"前方一堵墙"：墙固定在 AR -Z 方向 8m 处。
@@ -24,7 +25,10 @@ import {
 class WallAheadPerception implements SpatialPerception {
   private droneZ: number = 0;
   private readonly wallZ: number = -8; // 墙在 -Z 方向 8m
-  readonly emergencyDist: number = 0.4; // 硬停面（public 供仿真断言读取）
+  // 硬停面**静止基线**（public 供仿真断言读取）。
+  // 2026-10-06 随 App 侧「阈值挂速度」同步：硬停面改为随速度伸缩
+  // margin(v)=0.25+v²/3，仿真末端速度收敛到 0，停位即静止基线 0.25m（旧值 0.4）。
+  readonly emergencyDist: number = AVOID_MARGIN_BASE_M;
 
   /** 每帧由仿真器把无人机当前 Z 写入 */
   setDroneZ(z: number): void {

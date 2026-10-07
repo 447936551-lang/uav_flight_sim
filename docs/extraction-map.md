@@ -11,7 +11,7 @@
 | `ar/DroneController.ets`（运动学内核） | `src/model/DroneController.ts` | 仅搬运动学内核；双内核（真实动力学）切换逻辑留待 M3 |
 | `ar/WorldObject.ets` | `src/model/WorldObject.ts` | 世界对象基类（锚定 + 偏移位姿） |
 | `ar/CollisionDetector.ets` | `src/avoidance/CollisionDetector.ts` | 碰撞 / 威胁评估（纯函数） |
-| `ar/SteeringBehavior.ets`（含 apasMode） | `src/avoidance/SteeringBehavior.ts` | 转向避障；商标化能力去商标化为 `bypassMode` |
+| `ar/SteeringBehavior.ets`（含 bypassMode） | `src/avoidance/SteeringBehavior.ts` | 转向避障；商标化能力去商标化为 `bypassMode`；硬停面随速度伸缩（`avoidMarginFor`）、绕行方向按障碍方位择优（`pickAvoidSide`，2026-10-06 同步） |
 | `ar/HudModel.ets` | `src/telemetry/HudModel.ts` | HUD 威胁等级 / 配色 / 盲态（Blind）· 代测（degraded）· 抑制态（suppressed）三条「不是安全」语义 |
 | `ar/FlightDynamics.ets` | `src/dynamics/FlightDynamics.ts` | 刚体动力学积分器（半隐式欧拉） |
 | `ar/RotorMixer.ets` | `src/dynamics/RotorMixer.ts` | 四旋翼混控 + 执行器饱和 + 电机一阶滞后 |
@@ -40,6 +40,8 @@
 
 - 所有搬运文件**公式、常量、阈值、内置 `selfTest` 原样保留**，仅改写 import 路径；
 - 新增环境 / 动力学输入**默认关闭**，`useDynamics` 等同理，单测逐位对比旧行为钉死零回归；
-- 黄金用例数值恒定：盲飞 `−21.67m`、感知驱动硬停面 `0.40m`。
+- 黄金用例数值：盲飞 `−21.67m` 恒定；感知驱动硬停面自 2026-10-06 起为 **`0.25m`**
+  （静止基线 `margin(0)`；硬停面改为随速度伸缩 `margin(v)=0.25+v²/3`，
+  旧值 `0.40m` 为定值时代的语义，变更属 App 侧有意的语义演进而非回归）。
 
 详见 `CHANGELOG.md`。

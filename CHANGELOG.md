@@ -6,6 +6,73 @@
 
 ---
 
+## [0.2.3] — 2026-10-06
+
+随 App 侧避障打磨同步：**硬停面从定值改为随速度伸缩**（运动学自洽），外加绕行方向择优。
+这也是一次"同步即质检"的版本 —— 搬运过程中抓出并修掉了 App 侧自检的 3 条缺陷断言。
+
+> 背景：0.2.2 及之前的硬停面 `AVOID_MARGIN_M=0.4` 是**定值**，与速度脱钩。
+> 运动学上不自洽：1.5m/s 的刹车距离 `1.5²/(2×1.5)=0.75m` **大于** 0.4m 硬停面 ——
+> 满速冲向障碍时，等开始减速就已经撞上了。这正是真机「明明减速了还是碰到」的根因。
+
+### Added（新增）
+
+**`avoidance/CollisionDetector.ts` — 速度相关阈值（与 App 侧同源）**
+
+| 导出 | 说明 |
+| --- | --- |
+| `AVOID_MARGIN_BASE_M = 0.25` | 硬停面**静止基线**（机体半径 0.19 + 0.06 余量） |
+| `AVOID_BRAKE_ACCEL = 1.5` | 避障制动减速度（速度包线控制实测保守值） |
+| `avoidMarginFor(speed)` | `margin(v) = 0.25 + v²/3`：静止 0.25m、满速 1.0m（恰好覆盖刹车距离） |
+| `avoidSafeDistFor(speed, band)` | `= margin(v) + band`：减速带宽度不变，整体预警距离随刹车需求伸缩 |
+| `AVOID_CORRIDOR_HALF_M` / `AVOID_BELOW_PATH_M` | 前向碰撞走廊半宽 / 可飞越判据（App 侧走廊几何常量，随孪生同步） |
+| 上方净距纯函数 | `evaluateCeiling` / `sensorClimbScale` 等（爬升维度的避障，App 侧 P1 演进） |
+
+**`avoidance/SteeringBehavior.ts` — 绕行方向择优（App 侧 P1-1/P1-2 演进）**
+
+- 新增 `pickAvoidSide(lateral, deadzone)`：障碍在右 → 向左绕，在左 → 向右绕；
+  死区（0.12m）内返回 0，退回旧的「向右绕」行为，防读数噪声导致绕行方向逐帧翻转。
+  旧实现硬编码永远向右 —— 障碍偏左时会朝障碍那侧冲，表现为「在障碍前卡住不动」。
+- `AvoidResult` 新增 `avoidedLeft` / `avoidedRight`：HUD 可显示「正在向左/右绕行」。
+- `applyAvoidance()` 新增 2 个**可选**参数：`obstacleLateral`（横向偏置）、
+  `speed`（当前速度）。有默认值，**非破坏性**（旧 6 参调用逐字节等价）。
+
+**`tests/` — 4 条速度语义用例**：满速急停 / 静止仅减速（正反双向）/
+满速强度 ≥ 静止 / 显式 emergencyDist 优先于速度推导。
+
+### Changed（变更）
+
+| 项 | 说明 |
+| --- | --- |
+| 硬停面语义 | `applyAvoidance` 的 `DEFAULT_STEERING` 路径：定值 0.4 → `avoidMarginFor(speed)` 动态推导；params **显式**指定值仍优先（老契约不变）。`evaluate()` 独立默认值保持 `AVOID_MARGIN_M=0.4` 不变 |
+| 黄金值·感知驱动 | 硬停面 `0.40m` → **`0.25m`**（静止基线 `margin(0)`）。轨迹探针证实单调逼近零过冲（`minGap = finalGap`）。**语义变更而非回归** |
+| 黄金值·盲飞 | `-21.67m` **不变** ✅ |
+| `model/DroneController.ts` | 运动学内核调用点接入当前实际水平速度（与 App 侧同口径）；bypass 接线归 M3 |
+| 命名分叉 | App 侧 `apas*`（商标缩写）→ 仓库侧 `bypass*`，共 18 处（延续 0.2.x 去商标化规则） |
+| App 侧自检修复×3 | ①「显式优先」断言用 `emergencyDist=0.4` 当显式值，恰等于默认值 → 前提自反（改 0.6）；②③ 1.0m 档位断言与公式自反（满速时 1.0m 恰在硬停面上是 `stop` 非 `slow`；静止时 1.0 < 1.45 是 `slow` 非 `safe`）→ 改用档位真正翻转的 1.5m 对照 + 边界 `stop` 钉死。**源头在 App 侧修，仓库侧随同源搬运** |
+
+### Verified（验证）
+
+| 项 | 结果 |
+| --- | --- |
+| `tsc --noEmit` | ✅ 通过 |
+| `vitest run` | ✅ **85 passed**（0.2.2 为 81，新增 4 例；`--no-file-parallelism` 下稳定全绿） |
+| 零依赖自检 | ✅ `SteeringBehavior.selfTest` **31 项** / `CollisionDetector.selfTest` **52 项**，与 App 侧逐项同数 |
+| 仿真黄金用例 | ✅ 盲飞 `-21.67m` 不变；感知驱动 `0.25m`（新语义，见 Changed） |
+| `sim/sim_flight.ts` | ✅ 退出码 0，结论对比恢复正常输出 |
+| `check:dco` | ✅ 通过 |
+
+**已知遗留（未修）**：
+
+1. `model/DroneController.ts` 孪生仍只含**运动学内核**。App 侧自 0.2.2 以来还积累
+   级联控制接入、闭环定点悬停、软降落锥形减速等演进 —— 属双内核集成（M3）范围，
+   本版未同步。
+2. App 侧 `ARDepthSampler` 的锥角加密（13 射线/9 档/5×5 邻域）与支撑面分段容差
+   （低空 0.05m / 高空 0.25m）依赖 `@kit.AREngine`，按抽取清单不入库。
+3. 本机 vitest 并行 fork 池偶发 worker 崩溃（与测试逻辑无关；串行 85/85 稳定）。
+
+---
+
 ## [0.2.2] — 2026-09-25
 
 补齐 0.2.1 同步时**仍然漏掉的一支**：HUD 抑制态（`suppressed`）。
