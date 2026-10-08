@@ -1,6 +1,6 @@
 {
   "name": "uav_flight_sim",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "无人机飞行仿真纯算法层（零专有依赖，可在 CI / 离线仿真 / OpenHarmony 三方复用）",
   "license": "Apache-2.0",
   "main": "dist/index.js",
@@ -17,9 +17,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "sim": "tsx sim/sim_flight.ts",
+    "sim:scenarios": "tsx sim/scenarios.ts",
     "selfcheck": "tsx tests/run-self-tests.ts",
     "check:dco": "node scripts/check-dco.mjs",
-    "verify": "tsc -p tsconfig.json --noEmit && vitest run && tsx sim/sim_flight.ts && npm run check:dco"
+    "verify": "tsc -p tsconfig.json --noEmit && vitest run && tsx sim/sim_flight.ts && tsx sim/scenarios.ts && npm run check:dco"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",

@@ -102,7 +102,7 @@ src/
 | M1 建仓与规范 | 独立仓库 / Apache-2.0 / OWNERS / DCO / CI | ✅ 完成 |
 | M2 能力剥离与重构 | `core`/`model`/`avoidance`/`telemetry`/`contract` 五模块 + 单测 + 仿真黄金用例入 CI | ✅ 完成 |
 | M2+ 第二批剥离 | `dynamics` / `planning` / `environment` 三模块 + `EnvironmentPerception` 契约 | ✅ 完成（v0.2.0） |
-| M3 仿真方案与文档 | 脚本化仿真方案、场景示例、接入指南（含对接 Simulator SIG） | ⏳ 待办 |
+| M3 仿真方案与文档 | 脚本化仿真方案、场景示例、接入指南（含对接 Simulator SIG） | ✅ 完成（v0.2.4） |
 | M4 毕业准备 | 架构 SIG 毕业评审材料、QA SIG 准出材料 | ⏳ 待办 |
 
 > M2 交付后，原 App 仍以"源码依赖"方式接入本仓（见 `README.md` 接入说明），替换内联阈值以验证零回归；这是 M2 的回归验证手段，不改变本仓作为独立算法库的定位。

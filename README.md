@@ -55,8 +55,11 @@ src/
 tests/                 vitest 单测 + 零依赖自检 + 仿真黄金用例
 sim/
   sim_flight.ts         无头飞行仿真演示（含 MockPerception）
+  scenarios.ts          M3 场景仿真：五场景确定性冒烟（CI 门禁）
 docs/
   design.md             设计说明与验收口径
+  simulation.md         M3 脚本化仿真方案（无头 / 确定性 / 黄金值回归 / CI）
+  integration.md        M3 接入指南（外部仿真器 / Simulator SIG 对接）
 CHANGELOG.md            版本更新说明（新增 / 变更 / 验证 / 未纳入项）
 ```
 
@@ -78,8 +81,12 @@ npm install        # 安装 typescript / vitest / tsx
 npm run typecheck  # tsc 类型校验（无输出即通过）
 npm test           # 运行 vitest 单测
 npm run sim        # 运行无头飞行仿真演示
-npm run verify     # 一键：类型校验 + 单测 + 仿真
+npm run verify     # 一键：类型校验 + 单测 + 仿真 + 场景 + DCO
 ```
+
+> 场景仿真（`npm run sim:scenarios`）是 M3 新增的 CI 门禁：五场景确定性冒烟覆盖
+> model / avoidance / environment / planning 四个域，任一失败即非零退出。
+> 脚本化仿真方案与接入指南见 [`docs/simulation.md`](./docs/simulation.md) 与 [`docs/integration.md`](./docs/integration.md)。
 
 > 不装框架也能验收：`npm run selfcheck` 走零依赖自检（直接调用各模块内置 `selfTest()`）。
 
@@ -156,7 +163,7 @@ class MyWindSource implements EnvironmentPerception {
 | M1 建仓与规范 | 独立仓库 / Apache-2.0 / OWNERS / DCO / CI | ✅ 完成 |
 | M2 能力剥离与重构 | `core`/`model`/`avoidance`/`telemetry`/`contract` 五模块 + 单测 + 仿真黄金用例入 CI | ✅ 完成 |
 | M2+ 第二批剥离 | `dynamics`（刚体动力学）/ `planning`（A\* 规划）/ `environment`（大气）三模块 + `EnvironmentPerception` 契约 | ✅ 完成（v0.2.0） |
-| M3 仿真方案与文档 | 脚本化仿真方案、场景示例、接入指南（含对接 Simulator SIG） | ⏳ 待办 |
+| M3 仿真方案与文档 | 脚本化仿真方案（`docs/simulation.md`）、场景示例（`sim/scenarios.ts`）、接入指南（`docs/integration.md`，含对接 Simulator SIG） | ✅ 完成（v0.2.4） |
 | M4 毕业准备 | 架构 SIG 毕业评审材料、QA SIG 准出材料 | ⏳ 待办 |
 
 > v0.2.0 属**超出原提案范围**的新增能力（原提案 M1–M4 未含刚体动力学与路径规划）。

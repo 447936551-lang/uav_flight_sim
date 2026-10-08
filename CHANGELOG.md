@@ -6,6 +6,70 @@
 
 ---
 
+## [0.2.4] — 2026-10-08
+
+M3 收口：**脚本化仿真方案 + 场景示例 + 接入指南**（三项交付件全部落地，含对接 Simulator SIG 的协作流程）。
+本次**无算法/API 变更**，纯文档与仿真脚本，属 patch 级交付。
+
+> 背景：M3 的目标是让本仓「可在一条命令内被 CI / 外部仿真器复用」。
+> 前两个交付件（`docs/simulation.md` 脚本化仿真方案、`sim/scenarios.ts` 五场景确定性冒烟）
+> 已在本次一并完成并验证；本版补齐第三交付件 `docs/integration.md`（外部仿真器 / Simulator SIG 接入指南）。
+
+### Added（新增）
+
+**`docs/integration.md` — 接入指南（含对接 Simulator SIG）**
+
+- 外部仿真器 / 真机 / Simulator SIG 的接入路径：实现 `SpatialPerception` 与 `EnvironmentPerception`
+  两个契约、每帧 `drone.update(dt)`、`drone.perception = ...` 注入、读回 `offset*/vel*/state/avoidStrength`。
+- `DroneController` 公开 API 清单（生命周期 / 杆量 / 感知接入 / 位姿输出 / 避障输出 / 参数 / 驱动）。
+- 可选内核取用指南：**planning**（`buildOccupancyGrid` + `planPath` 自动绕障）、
+  **dynamics**（`FlightDynamics` + `mixThrusts` 真实刚体积分，内环子步 `h ≤ 1/240`）、
+  **telemetry**（`deriveHud` 告警面板，必填 `depthTrustworthy` / `suppressed`）。
+- 「对接 Simulator SIG」专章：与 UAV SIG 关系、上游门户 `openharmony-robot/uav`、DCO 签署的贡献流程
+  （fork → 特性分支 → `git commit -s` → 双远端 `origin`(atomgit)+`github` 推送 → PR 评审）、维护约定与最小对接 Checklist。
+- 常见问题：坐标轴向、感知延迟、渲染分离、运动学 vs 刚体内核选型。
+
+**`sim/scenarios.ts` — 五场景确定性冒烟**（CI 门禁，已在本次一并落地）
+
+- 盲飞穿墙 / 感知驱动硬停 / 侧风漂移 / 绕行方向择优 / A\* 规划绕障，退出码验收（PASS→0 / FAIL→1）。
+- 详见 `docs/simulation.md` 与 `sim/scenarios.ts` 文件头注释。
+
+**`docs/simulation.md` — 脚本化仿真方案**（已在本次一并落地）
+
+- 六原则（无头 / 确定性 / 零专有依赖 / 契约注入 / 退出码验收 / 常量即黄金）、两个入口、循环骨架、
+  黄金值回归红线、与单测分工、CI 集成、如何新增场景。
+
+**`package.json` / `package-lock.json`**
+
+- 新增脚本 `sim:scenarios`（`tsx sim/scenarios.ts`）；
+- `verify` 链追加 `sim:scenarios`（typecheck → vitest → sim → sim:scenarios → check:dco）；
+- 版本号同步升至 `0.2.4`（package.json 与 package-lock.json 两处）。
+
+### Changed（变更）
+
+| 项 | 说明 |
+| --- | --- |
+| 无 | 本次未改动任何算法逻辑 / 公开 API / 阈值常量（零回归，纯文档 + 仿真脚本） |
+
+### Verified（验证）
+
+| 项 | 结果 |
+| --- | --- |
+| `tsc --noEmit` | ✅ 通过 |
+| `vitest run` | ✅ 85 passed（与 0.2.3 持平，本次无新增单测） |
+| 零依赖自检 | ✅ 全部模块 `selfTest` 通过 |
+| `sim/sim_flight.ts` | ✅ 退出码 0 |
+| `sim/scenarios.ts`（`npm run sim:scenarios`） | ✅ **5/5 PASS，退出码 0**（盲飞 −21.67m / 感知急停 0.25m / 侧风 0.99m / 绕行方向正确 / A\* 绕行 \|z\|=2.30m） |
+| `check:dco` | ✅ 通过 |
+
+**未纳入（本次仅文档/M3，非代码改动）**：
+
+1. App 侧 `ARDepthSampler` 锥角加密与支撑面分段容差仍依赖 `@kit.AREngine`，按抽取清单不入库。
+2. `DroneController` 孪生仍只含运动学内核；级联控制 / 闭环定点 / 软降落锥减属双内核集成（M3 规划），未随本次文档工作同步。
+3. 本机 vitest 并行 fork 池偶发 worker 崩溃（与测试逻辑无关；串行 85/85 稳定），仍建议 `--no-file-parallelism`。
+
+---
+
 ## [0.2.3] — 2026-10-06
 
 随 App 侧避障打磨同步：**硬停面从定值改为随速度伸缩**（运动学自洽），外加绕行方向择优。
