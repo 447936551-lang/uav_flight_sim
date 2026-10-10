@@ -6,6 +6,62 @@
 
 ---
 
+## [0.3.0] — 2026-10-10
+
+M3 收口：**DroneController 双内核**（运动学 ↔ 真实刚体动力学）集成 —— 把 App 侧 P1 真实飞控动力学与 P2 执行器动力学（电机一阶滞后 + 每桨差动）以「默认关闭、零回归」的方式并入库内控制器。
+
+> 背景：本仓自 0.2.0 起已包含 `FlightDynamics` / `RotorMixer` / `CascadeController` 三块纯函数，
+> 但 `DroneController` 仍只消费运动学内核（对输入积分速度、由速度反推姿态）。真机的「四桨推力
+> 如何演化出姿态与抗风」「电机上电滞后导致短暂下沉」等物理级行为无法在库内复现。本次把
+> 双内核切换并入控制器，**默认仍走运动学**（与旧行为逐位一致），仅在 `setFlightMode(true)`
+> 时启用真实刚体积分链路。
+
+### Added（新增）
+
+**`src/model/DroneController.ts` — 双内核开关与真实动力学链路**
+
+| 公开符号 | 说明 |
+| --- | --- |
+| `useDynamics: boolean` | 内核开关（默认 `false` ⇒ 与旧运动学逐位一致；`true` ⇒ 真实刚体动力学） |
+| `setFlightMode(useDynamics)` | 切换时把当前运动学状态**无缝交接**给刚体（`dyn().syncFrom(...)` + `plant().reset()` + `holdY = offsetY`），避免跳变 |
+| `holdY: number` | 高度保持设定点（米）；松杆时高度位置环把飞机拉回此高度（修复纯速度控制在电机上电期下沉） |
+| `rotorSpeeds: number[]` | 四桨实际归一化转速 `[FL, FR, BL, BR]`（0..maxRotor），供 HUD / 渲染读取 |
+| `stepDynamics(dt, ...)` | 级联→刚体子步循环：`velocityLoop` → `verticalLoop` → `dragForce`（相对气流前馈）→ `thrustVector`（重力 + 阻力前馈，解 `T·û`）→ `tiltFromUpDir` → `attitudeTorque`（PD）→ `mixThrusts` → `applyActuatorLimit` → `RotorPlant.update`（电机一阶滞后）→ `FlightDynamics.step`（半隐式欧拉，子步 `h ≤ 1/240`） |
+| 软降落锥 | `LAND_TAPER_BAND = 0.4` / `LAND_TOUCHDOWN_SPEED = 0.12`；低于 band 时 `desVY = -LAND_TOUCHDOWN_SPEED * clamp(offsetY / LAND_TAPER_BAND, 0, 1)` |
+| 执行器动力学 | `RotorPlant`（电机一阶滞后 τ = `DYN_MOTOR_TAU = 0.05`）+ 每桨差动；**饱和做在转速上**（真实上限是 RPM 不是推力），饱和后机身力矩由实际推力反解（物理诚实） |
+| selfTest 断言 10–12 | 双内核开关生效 / 动力学悬停稳定（`|offsetX/Z|<0.05`、`|offsetY−0.9|<0.1`、`|pitch/roll|<5°`）/ 动力学前飞（`offsetZ < −0.3`）；`DroneController.selfTest` 现 **22 项断言全通过** |
+
+**`sim/scenarios.ts` — 第 6 场景「动力学内核急停（useDynamics）」**
+
+- `setFlightMode(true)` + 满前向推杆 20s，验收停在 `AVOID_MARGIN_BASE_M ± 0.15`（动力学有刚体惯性 + 电机滞后，容差比运动学 0.05 略松）；结论改用 `${passed}/${SCENARIOS.length}` 真实计数。
+
+### Changed（变更）
+
+| 项 | 说明 |
+| --- | --- |
+| 增益（针对真实模块实测调参，避免失稳） | `DYN_VEL_KP=4 / DYN_MAX_ACCEL=6 / DYN_ATT_KP=20 / DYN_ATT_KD=0.5 / DYN_YAW_KP=80 / DYN_ALT_KP=1.2 / DYN_SUBSTEP_HZ=240 / DYN_MOTOR_TAU=0.05` |
+| `docs/extraction-map.md` | DroneController 行由「仅运动学、双内核留待 M3」更新为「双内核已并入」；原「故意未纳入」中的 `useDynamics` / `setFlightMode` 行移除（已纳入） |
+| `docs/integration.md` | 公开 API 清单新增「内核切换」类别（`setFlightMode` / `useDynamics` / `rotorSpeeds` / `holdY`）；§5.2 由「直接用 FlightDynamics」改为「经 `setFlightMode(true)` 启用内置双内核」 |
+| `sim/scenarios.ts` 头部注释 | 「5 个」→「6 个」确定性场景 |
+| `README.md` | 同步目录结构 DroneController 描述与场景计数（5→6） |
+| 版本号 | `package.json` 与 `package-lock.json` 同步升至 `0.3.0`（两处） |
+
+### Verified（验证）
+
+| 项 | 结果 |
+| --- | --- |
+| `tsc --noEmit` | ✅ 通过 |
+| `vitest run` | ✅ **85 passed**（无新增单测；M3 Step2 行为守护落在 selfTest + 场景） |
+| 零依赖自检 | ✅ `DroneController.selfTest` **22 项断言全通过** |
+| `sim/scenarios.ts`（`npm run sim:scenarios`） | ✅ **6/6 通过，退出码 0**（盲飞 / 感知急停 / 侧风闭环 / 绕行择优 / A\* 规划 / 动力学急停） |
+| `sim/sim_flight.ts` | ✅ 退出码 0（盲飞 `−21.67m` / 感知急停 `0.25m` **数值未变**） |
+| `check:dco` | ✅ 通过 |
+
+**零回归保证**：默认 `useDynamics=false` 时，整套动力学 / 混控 / 执行器链路不介入，`update()`
+运动学路径逐位不变；黄金值（`−21.67m` / `0.25m`）与既有 85 例单测全部守住。
+
+---
+
 ## [0.2.5] — 2026-10-08
 
 从 App 侧 `ar/ARDepthSampler.ets` **抽取算法本质**（按既定开源边界 C2：**仅纯函数，不搬 AREngine 耦合的采样编排**）。
