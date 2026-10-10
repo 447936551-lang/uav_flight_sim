@@ -12,6 +12,7 @@
 | `ar/WorldObject.ets` | `src/model/WorldObject.ts` | 世界对象基类（锚定 + 偏移位姿） |
 | `ar/CollisionDetector.ets` | `src/avoidance/CollisionDetector.ts` | 碰撞 / 威胁评估（纯函数） |
 | `ar/SteeringBehavior.ets`（含 bypassMode） | `src/avoidance/SteeringBehavior.ts` | 转向避障；商标化能力去商标化为 `bypassMode`；硬停面随速度伸缩（`avoidMarginFor`）、绕行方向按障碍方位择优（`pickAvoidSide`，2026-10-06 同步） |
+| `ar/ARDepthSampler.ets`（**仅算法本质子集**） | `src/avoidance/FusionGeometry.ts` | 多源融合几何的**纯函数**部分：近场闸门 `DEPTH_MIN_VALID_M`、支撑面/上方判据 `isSupportSurfaceHit`/`isOverheadHit`、前向净距折算 `forwardGapFromWorldHit`、射线求交 `rayPlaneT`/`rayTriangleT`。`Vec3` 由元组改对象（唯一命名分叉）；阈值复用 `CollisionDetector` 的 `AVOID_*` |
 | `ar/HudModel.ets` | `src/telemetry/HudModel.ts` | HUD 威胁等级 / 配色 / 盲态（Blind）· 代测（degraded）· 抑制态（suppressed）三条「不是安全」语义 |
 | `ar/FlightDynamics.ets` | `src/dynamics/FlightDynamics.ts` | 刚体动力学积分器（半隐式欧拉） |
 | `ar/RotorMixer.ets` | `src/dynamics/RotorMixer.ts` | 四旋翼混控 + 执行器饱和 + 电机一阶滞后 |
@@ -32,7 +33,7 @@
 | `algorithms/FlightAlgorithm.ets` + `algorithms/{WaypointFlight,RthFlight,PoiOrbit,ApasAvoidance}.ets` | 算法竞技框架（`FlightAlgorithm` 契约 + 注册表）按项目决策暂不纳入；其中「智能绕障」本体已以 `bypassMode` 并入 `avoidance/SteeringBehavior` |
 | `ai/*`（MindSporeLite 端侧推理） | 依赖 `@kit.MindSporeLiteKit`，属设备能力层 |
 | `service/AlertService.ets` | 依赖 `@kit.SensorServiceKit` / `AudioKit` / `MediaKit`，属 UI 反馈层 |
-| `ar/ARDepthSampler.ets` / `ARPlaneTracker.ets` / `MeshProbe.ets` / `MeshSampler.ets` / `AtmosphereSource.ets` | 依赖 `@kit.AREngine` / `@kit.ArkGraphics3D`，属数据源 / 渲染层；其**接口**已抽象为 `SpatialPerception` / `EnvironmentPerception` |
+| `ar/ARDepthSampler.ets` / `ARPlaneTracker.ets` / `MeshProbe.ets` / `MeshSampler.ets` / `AtmosphereSource.ets` | 依赖 `@kit.AREngine` / `@kit.ArkGraphics3D`，属数据源 / 渲染层；其**接口**已抽象为 `SpatialPerception` / `EnvironmentPerception`。**注意**：`ARDepthSampler` 中**与平台无关的纯函数子集**（近场闸门、支撑面/上方判据、前向净距折算、射线-平面/三角形求交）已于 0.2.5 抽取进 `src/avoidance/FusionGeometry.ts`；**未纳入**的是其采样编排（`@kit.AREngine` 依赖、锥角加密、跨来源平滑、`FUSION_*` 开关及运行时路径） |
 | `ar/ARCameraIntrinsics.ets` / `ARSessionManager.ets` / `ARFrameStream.ets` / `AnchorManager.ets` / `DroneVisuals.ets` / `HoldTargetVisual.ets` / `HorizonVisual.ets` / `ARDroneCallback.ets` / `ARDroneSession.ets` | AR 渲染 / 会话管理层，超出算法库范围 |
 | `signing/`（release.p12 等密钥） | **严禁入库**：私有签名 / 密钥 / 资源 |
 

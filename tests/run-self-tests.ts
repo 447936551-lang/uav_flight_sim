@@ -4,6 +4,7 @@
  */
 import { selfTest as collisionSelfTest } from '../src/avoidance/CollisionDetector';
 import { selfTest as steeringSelfTest } from '../src/avoidance/SteeringBehavior';
+import { selfTest as fusionGeometrySelfTest } from '../src/avoidance/FusionGeometry';
 import { DroneController } from '../src/model/DroneController';
 import { selfTest as hudSelfTest } from '../src/telemetry/HudModel';
 import { selfTest as rotorMixerSelfTest, RotorPlant } from '../src/dynamics/RotorMixer';
@@ -31,6 +32,7 @@ function run(name: string, fn: () => void | string): void {
 // ── 既有模块 ────────────────────────────────────────────────────
 run('CollisionDetector', () => collisionSelfTest());
 run('SteeringBehavior', () => steeringSelfTest());
+run('FusionGeometry', () => fusionGeometrySelfTest());
 run('DroneController', () => {
   DroneController.selfTest();
 });

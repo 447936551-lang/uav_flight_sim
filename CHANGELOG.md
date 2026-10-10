@@ -6,6 +6,59 @@
 
 ---
 
+## [0.2.5] — 2026-10-08
+
+从 App 侧 `ar/ARDepthSampler.ets` **抽取算法本质**（按既定开源边界 C2：**仅纯函数，不搬 AREngine 耦合的采样编排**）。
+
+> 背景：App 侧 0.2.4 之后新增「近场最小距离闸门 + 多源融合几何」，其中
+> 采样编排（`@kit.AREngine` 依赖、锥角加密、跨来源平滑）按 `docs/extraction-map.md`
+> 属闭源层、不入库；但其中**纯几何 / 纯判据**与平台无关，可安全提取复用到本仓。
+> 本次即按用户拍板的「仅抽离算法本质」范围落地。
+
+### Added（新增）
+
+**`avoidance/FusionGeometry.ts` — 多源融合几何（算法本质）**
+
+| 导出 | 说明 |
+| --- | --- |
+| `DEPTH_MIN_VALID_M = 0.05` | 近场最小距离闸门：剔近零噪声，远低于停障距离，零回归（Pura70 实测刹停 0.29m ≫ 此门） |
+| `DEPTH_MIN_VALID_MM` | 同值毫米表达（接口对称，便于下游日志） |
+| `MIN_PROBE_DIST_M = 0.3` | 镜像 App `PROBES_M[0]`，仅用于近场闸门断言 |
+| `isSupportSurfaceHit(surfY, baseY, originY)` | 支撑面判据（高度分段容差：低空 0.05m / 高空 0.25m），基准为机体自身高度 |
+| `isOverheadHit(surfY, originY)` | 上方命中判据（与支撑面判据方向相反，成对阅读） |
+| `forwardGapFromWorldHit(hit, origin, fwd, baseY, originY)` | 单世界系命中点的「前向障碍净距」折算（走廊 / 支撑面 / 可飞越三判据，与深度主循环同口径） |
+| `rayPlaneT(origin, dir, c, n)` | 射线-平面求交（Möller–Trumbore 同系），用于平面源 |
+| `rayTriangleT(orig, dir, v0, v1, v2)` | 射线-三角形求交（Möller–Trumbore），用于网格源 |
+
+- 阈值常量（`AVOID_CORRIDOR_HALF_M` / `AVOID_BELOW_PATH_M` / `AVOID_MARGIN_M`）由 `CollisionDetector` 单一事实来源导出，**不重复定义**。
+- **唯一允许的命名分叉**：App 侧 `Vec3` 为元组 `[x,y,z]`，本仓为对象 `{x,y,z}`；本文件全部向量访问由 `[0]/[1]/[2]` 改为 `.x/.y/.z`，几何含义逐位一致。
+- `selfTest()`：**12 项断言全通过**（近场闸门 2 + forwardGap 5 + rayPlaneT 3 + rayTriangleT 2），复刻 App `ARDepthSampler.selfTest` 的对应断言簇。
+- `src/index.ts` barrel 扩容，导出上述全部公开符号（同名 `selfTest` 别名化为 `fusionGeometrySelfTest`）；`tests/run-self-tests.ts` 接入 `run('FusionGeometry', ...)`。
+
+### Changed（变更）
+
+| 项 | 说明 |
+| --- | --- |
+| 版本号 | `package.json` 与 `package-lock.json` 同步升至 `0.2.5`（两处） |
+| 抽取边界 | `docs/extraction-map.md`「已纳入」新增 `FusionGeometry` 行；`ARDepthSampler` 仍列于「故意未纳入」（仅其纯函数子集被抽取） |
+
+### Verified（验证）
+
+| 项 | 结果 |
+| --- | --- |
+| `tsc --noEmit` | ✅ 通过 |
+| `vitest run` | ✅ **85 passed**（`--no-file-parallelism` 稳定全绿） |
+| 零依赖自检 | ✅ `FusionGeometry.selfTest` **12 项断言全通过**；全部模块 selfTest 通过 |
+| `sim/sim_flight.ts` | ✅ 退出码 0（盲飞 −21.67m / 感知急停 0.25m，未变） |
+| `sim/scenarios.ts` | ✅ 5/5 PASS，退出码 0 |
+| `check:dco` | ✅ 通过 |
+
+**未纳入（按设计排除）**：`ARDepthSampler` 的采样编排（`@kit.AREngine` 依赖、锥角加密、跨来源平滑、
+`FUSION_ENABLED`/`FUSION_MESH_ENABLED` 开关及其运行时路径）；`PROBES_M` 全档数组仅以 `MIN_PROBE_DIST_M=0.3`
+镜像最小档，最大档等运行时参数不入库。
+
+---
+
 ## [0.2.4] — 2026-10-08
 
 M3 收口：**脚本化仿真方案 + 场景示例 + 接入指南**（三项交付件全部落地，含对接 Simulator SIG 的协作流程）。

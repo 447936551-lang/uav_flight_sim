@@ -49,6 +49,19 @@ export {
   selfTest as collisionSelfTest,
 } from './avoidance/CollisionDetector';
 
+// ── 避障层：多源融合几何（算法本质，从 ARDepthSampler 抽离的纯函数）──
+export {
+  DEPTH_MIN_VALID_M,
+  DEPTH_MIN_VALID_MM,
+  MIN_PROBE_DIST_M,
+  isSupportSurfaceHit,
+  isOverheadHit,
+  forwardGapFromWorldHit,
+  rayPlaneT,
+  rayTriangleT,
+  selfTest as fusionGeometrySelfTest,
+} from './avoidance/FusionGeometry';
+
 // ── 避障层：转向力合成 + 速度域避障 ──────────────────────────────
 export {
   SteeringParams,
