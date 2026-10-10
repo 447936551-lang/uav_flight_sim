@@ -114,8 +114,8 @@ function flyTowardWall(seconds: number, withPerception: boolean): {
   };
 }
 
-/** 悬停 seconds 秒（无杆量），返回 X 向漂移 */
-function hoverDriftX(seconds: number, wind: boolean): number {
+/** 悬停 seconds 秒（无杆量），返回 X 向漂移与保持环接合标志 */
+function hoverDriftX(seconds: number, wind: boolean): { driftX: number; holdEngaged: boolean } {
   const d = new DroneController();
   d.placed = true;
   d.flying = true;
@@ -127,7 +127,7 @@ function hoverDriftX(seconds: number, wind: boolean): number {
   for (let i = 0; i < frames; i++) {
     d.update(DT);
   }
-  return d.offsetX;
+  return { driftX: d.offsetX, holdEngaged: d.holdEngaged };
 }
 
 // ── 五个场景 ─────────────────────────────────────────────────────
@@ -157,16 +157,29 @@ function scenarioPerceptionStop(): ScenarioOutcome {
   };
 }
 
-/** 场景 3：侧风漂移 —— EnvironmentPerception 注入恒风，悬停被动漂移 */
+/**
+ * 场景 3：侧风闭环补偿 —— EnvironmentPerception 注入恒风，闭环保持环接合并抵消风扰。
+ * ------------------------------------------------------------------
+ * M3 Step1 之前：无风零漂移 + 有风被动漂移（open-loop，3m/s 风 10s 约漂 1m）。
+ * M3 Step1 之后：启用环境感知时闭合位置环，把风扰前馈（抵消 90%）+ 反馈（位置环拉回锚点）
+ *   双重压回锚点，表现为：
+ *     ① 有风时 holdEngaged=true —— 证明环境契约确被消费（否则保持环不会接合）；
+ *     ② 残余漂移被压到极小（<0.1m，相较开环约 1m 收敛两个数量级）且下风方向 ——
+ *        既证明风被读入（非零），又证明闭环把它压住（远小于开环）；
+ *     ③ 无风 / 环境关闭时仍逐位零漂移且保持环不介入 —— 零回归硬保证。
+ */
 function scenarioWindDrift(): ScenarioOutcome {
   const calm = hoverDriftX(10, false);
   const windy = hoverDriftX(10, true);
-  // 无风必须逐位零漂移（零回归硬保证）；有风必须有可观测的被动漂移
-  const ok = Math.abs(calm) < 1e-9 && windy > 0.1 && isFinite(windy);
+  // 无风必须逐位零漂移（零回归硬保证）；保持环默认不介入
+  const ok = Math.abs(calm.driftX) < 1e-9 && !calm.holdEngaged &&
+    // 有风：环境契约被消费（保持环接合）、残余风扰被闭环压到极小（下风方向但受控）
+    windy.holdEngaged && windy.driftX > 1e-4 && windy.driftX < 0.1 && isFinite(windy.driftX);
   return {
     ok,
-    detail: `无风漂移=${calm.toFixed(4)}m（预期 0）  ` +
-      `3m/s 侧风漂移=${windy.toFixed(2)}m（增益 WIND_GAIN=${WIND_GAIN}）`,
+    detail: `无风漂移=${calm.driftX.toFixed(4)}m（预期 0，holdEngaged=${calm.holdEngaged}）  ` +
+      `3m/s 侧风（闭环保持）残留=${windy.driftX.toFixed(4)}m（增益 WIND_GAIN=${WIND_GAIN}，` +
+      `holdEngaged=${windy.holdEngaged}；开环本应漂约 1m）`,
   };
 }
 
@@ -229,7 +242,7 @@ function scenarioPlanAroundWall(): ScenarioOutcome {
 const SCENARIOS: Array<[string, Scenario]> = [
   ['盲飞穿墙（危险基线）', scenarioBlindFly],
   ['感知驱动硬停（SpatialPerception）', scenarioPerceptionStop],
-  ['侧风漂移（EnvironmentPerception）', scenarioWindDrift],
+  ['侧风闭环补偿（EnvironmentPerception）', scenarioWindDrift],
   ['绕行方向择优（bypass 纯函数）', scenarioBypassSide],
   ['A* 规划绕障（planning）', scenarioPlanAroundWall],
 ];

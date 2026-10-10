@@ -33,6 +33,15 @@ import { Vec3 } from '../core/Vec3';
 import { SpatialPerception } from '../contract/SpatialPerception';
 import { EnvironmentPerception } from '../contract/EnvironmentPerception';
 import { WIND_GAIN } from '../environment/Atmosphere';
+import { positionHoldVelocity } from '../dynamics/CascadeController';
+
+// —— 闭环定点保持（M3 Step1）：复用 CascadeController.positionHoldVelocity ——
+// 与动力学模式的位置环同源：松杆 + 启用环境感知时，把飞机拉回锚点，
+// 抵消风扰与残差，实现「松杆即定点、风吹也不跑」的闭环悬停。
+const KIN_WIND_FEEDFORWARD: number = 0.9; // 风扰前馈抵消比例 0..1（留 0.1 差额保留"被风推"实感）
+const KIN_POS_KP: number = 1.5;           // 位置环增益（1/s），与动力学 DYN_POS_KP 同量级
+const KIN_HOLD_RESP: number = 6.0;        // 保持环速度响应（1/s）
+const KIN_HOLD_AUTHORITY: number = 1.0;   // 保持权限（占 maxSpeed 比例），防异常误差猛冲回锚点
 
 /**
  * 无人机权威状态（Phase 5 显式物理状态机）。
@@ -238,6 +247,16 @@ export class DroneController {
   /** 摇杆方向：x = 左右(-1~1)，y = 前后(-1~1) */
   public moveX: number = 0;
   public moveY: number = 0;
+
+  /**
+   * 闭环定点保持的锚点（米）与接合标志（M3 Step1）。
+   * 无输入且启用环境感知时，位置环把飞机拉回 (holdX, holdZ)，
+   * 抵消风扰与残差，实现「松杆即定点、风吹也不跑」的闭环悬停。
+   * 默认 environmentActive=false 时整个闭环不介入 → 与旧开环阻尼逐位一致（零回归）。
+   */
+  public holdX: number = 0;
+  public holdZ: number = 0;
+  public holdEngaged: boolean = false;
 
   /**
    * 空间感知输入（"空间感知输入" 契约）。
@@ -513,6 +532,41 @@ export class DroneController {
       const k: number = decayFactor(p.damping, dt);
       this.velX *= k;
       this.velZ *= k;
+      // —— 闭环定点保持（M3 Step1）：启用环境感知时，把松杆漂移拉回锚点 ——
+      // 与动力学模式的位置环同源（复用 CascadeController.positionHoldVelocity），
+      // 并叠加风扰前馈：① 前馈主动顶风，② 反馈位置环把残余误差拉回锚点。
+      // environmentActive=false（默认）时整个块不介入 → 与旧开环阻尼逐位一致（零回归）。
+      if (this.environmentActive) {
+        // 首次接合：锚点定在当前位姿，避免突兀拉回。
+        if (!this.holdEngaged) {
+          this.holdX = this.offsetX;
+          this.holdZ = this.offsetZ;
+          this.holdEngaged = true;
+        }
+        // ① 前馈：主动出力顶风，抵消 KIN_WIND_FEEDFORWARD 比例的风扰加速度
+        this.velX += -this.windAccelX * KIN_WIND_FEEDFORWARD * dt;
+        this.velZ += -this.windAccelZ * KIN_WIND_FEEDFORWARD * dt;
+        // ② 反馈：位置环把残余误差拉回锚点（急停时位置环不介入，避免与防撞意图相反）
+        if (!this.avoidEmergency) {
+          const hv: number[] = positionHoldVelocity(this.holdX, this.holdZ,
+            this.offsetX, this.offsetZ, KIN_POS_KP, p.maxSpeed * KIN_HOLD_AUTHORITY);
+          let hx: number = hv[0];
+          let hz: number = hv[1];
+          if (this.avoidanceEnabled) {
+            this.steering.maxSpeed = p.maxSpeed;
+            const curSpeedH: number = Math.sqrt(this.velX * this.velX + this.velZ * this.velZ);
+            const avh: AvoidResult = applyAvoidance(hx, hz, fx, fz,
+              this.obstacleDistance, this.steering, false, 0, curSpeedH);
+            hx = avh.vx;
+            hz = avh.vz;
+          }
+          const resp: number = clampValue(KIN_HOLD_RESP * dt, 0, 1);
+          this.velX += (hx - this.velX) * resp;
+          this.velZ += (hz - this.velZ) * resp;
+        }
+      } else {
+        this.holdEngaged = false;
+      }
     }
 
     // —— 垂直：上升 / 下降 ——
@@ -798,6 +852,33 @@ export class DroneController {
       }
       const fwdSpeed: number = d.velX * d.forwardX + d.velZ * d.forwardZ;
       check('gap=1.0 前向不被归零', fwdSpeed > 0.3);
+    }
+
+    // 8) 闭环定点保持（M3 Step1）：环境感知开启 + 松杆时，风扰下应拉回锚点而非无限漂走
+    {
+      const d: DroneController = new DroneController();
+      d.placed = true;
+      d.flying = true;
+      d.obstacleDistance = Infinity;
+      // 注入确定性风场（沿 +X，1 m/s），通过 EnvironmentPerception 契约
+      d.environment = { getWindVelocity: (): Vec3 | null => ({ x: 1.0, y: 0, z: 0 }) };
+      d.environmentActive = true;
+      d.offsetX = 0.5; // 偏离锚点
+      for (let i = 0; i < 600; i++) {
+        d.update(1 / 60);
+      }
+      check('闭环保持：风扰下松杆收敛回锚点', Math.abs(d.offsetX - 0.5) < 0.2);
+      check('闭环保持：已接合保持环', d.holdEngaged === true);
+    }
+
+    // 9) 闭环保持默认关闭（零回归）：未启用环境感知时保持环不介入
+    {
+      const d: DroneController = new DroneController();
+      d.placed = true;
+      d.flying = true;
+      d.obstacleDistance = Infinity;
+      d.update(1 / 60); // 无输入帧
+      check('默认（环境关闭）保持环不接合', d.holdEngaged === false);
     }
 
     if (fails.length !== 0) {
