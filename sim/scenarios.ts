@@ -1,9 +1,9 @@
 /**
- * M3 场景示例（脚本化仿真）：一次跑完 5 个确定性场景。
+ * M3 场景示例（脚本化仿真）：一次跑完 6 个确定性场景。
  * ---------------------------------------------------------------
  * 与 sim_flight.ts 的关系：
  *   - sim_flight.ts  —— 「最小演示」：单场景对比（盲飞 vs 感知急停），面向 README 读者；
- *   - scenarios.ts   —— 「场景全集」：覆盖五个模块域的端到端脚本，面向接入方与 CI 冒烟。
+ *   - scenarios.ts   —— 「场景全集」：覆盖六个模块域的端到端脚本，面向接入方与 CI 冒烟。
  *
  * 确定性三原则（详见 docs/simulation.md）：
  *   1. 定步长 dt = 1/60，帧数固定 —— 无时钟依赖、无随机源；
@@ -237,6 +237,37 @@ function scenarioPlanAroundWall(): ScenarioOutcome {
   };
 }
 
+/** 场景 6：动力学内核急停 —— useDynamics=true 时，感知硬停面停距与运动学同口径 */
+function scenarioDynamicsStop(): ScenarioOutcome {
+  const d: DroneController = new DroneController();
+  d.placed = true;
+  d.flying = true;
+  d.setFlightMode(true); // 切到真实动力学内核
+  const wall: WallAheadPerception = new WallAheadPerception();
+  d.perception = wall; // 接入"空间感知输入"契约
+  d.moveY = 1; // 满前向推杆
+  let minGap: number = Infinity;
+  const frames: number = Math.round(60 * 20);
+  for (let i = 0; i < frames; i++) {
+    wall.setDroneZ(d.offsetZ);
+    d.update(DT);
+    const gap: number = wall.getObstacleDistance();
+    if (gap < minGap) {
+      minGap = gap;
+    }
+  }
+  const finalGap: number = wall.getObstacleDistance();
+  // 动力学有刚体惯性 + 电机滞后，允许比运动学(0.05)略松的容差(0.15)
+  const tol: number = 0.15;
+  const ok: boolean = Math.abs(finalGap - AVOID_MARGIN_BASE_M) <= tol &&
+    minGap >= AVOID_MARGIN_BASE_M - tol;
+  return {
+    ok,
+    detail: `动力学急停 finalGap=${finalGap.toFixed(2)}m（预期 ${AVOID_MARGIN_BASE_M.toFixed(2)}±${tol}）` +
+      ` minGap=${minGap.toFixed(2)}m  终态=${d.state}`,
+  };
+}
+
 // ── 入口 ─────────────────────────────────────────────────────────
 
 const SCENARIOS: Array<[string, Scenario]> = [
@@ -245,6 +276,7 @@ const SCENARIOS: Array<[string, Scenario]> = [
   ['侧风闭环补偿（EnvironmentPerception）', scenarioWindDrift],
   ['绕行方向择优（bypass 纯函数）', scenarioBypassSide],
   ['A* 规划绕障（planning）', scenarioPlanAroundWall],
+  ['动力学内核急停（useDynamics）', scenarioDynamicsStop],
 ];
 
 // biome-ignore lint/suspicious/noConsole: 仿真脚本有意输出
@@ -253,6 +285,7 @@ console.log('=== uav_flight_sim 场景仿真（M3 脚本化仿真方案） ===')
 console.log('定步长 dt=1/60 · 无随机源 · 感知/环境走契约注入\n');
 
 let failed = false;
+let passed = 0;
 for (const [name, fn] of SCENARIOS) {
   let outcome: ScenarioOutcome;
   try {
@@ -266,6 +299,8 @@ for (const [name, fn] of SCENARIOS) {
   console.log(`         ${outcome.detail}`);
   if (!outcome.ok) {
     failed = true;
+  } else {
+    passed++;
   }
 }
 
@@ -273,5 +308,5 @@ for (const [name, fn] of SCENARIOS) {
 console.log('');
 // biome-ignore lint/suspicious/noConsole: 仿真脚本有意输出
 console.log(failed ? '结论：存在失败场景，请检查最近改动是否破坏黄金行为。' :
-  '结论：5/5 场景通过 —— 纯算法层在无头环境下行为符合验收口径。');
+  `结论：${passed}/${SCENARIOS.length} 场景通过 —— 纯算法层在无头环境下行为符合验收口径。`);
 process.exit(failed ? 1 : 0);

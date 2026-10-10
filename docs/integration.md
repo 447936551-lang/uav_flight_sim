@@ -145,6 +145,10 @@ function frame(userStick: { mx: number; my: number; climb: number; yaw: number }
 | | `avoidEmergency: boolean` | 进入硬停面急停保持（fail-safe） |
 | | `steering: SteeringParams` | 避障增益（可调，含 `bypassMode` / `steerGain`） |
 | **参数** | `params: DroneFlightParams` | 飞行动力学参数（改手感用，见默认值） |
+| **内核切换（可选）** | `useDynamics: boolean` | 真实刚体动力学开关（默认 `false` = 运动学；`true` = 级联控制 + 刚体积分 + 混控 + 执行器一阶滞后） |
+| | `setFlightMode(useDynamics)` | 切换并把当前运动学状态**无缝交接**给刚体（`syncFrom` + 重置电机 + `holdY = 当前高度`），避免跳变 |
+| | `rotorSpeeds: number[]` | 四桨实际归一化转速 `[FL, FR, BL, BR]`（动力学内核下逐桨独立；运动学下恒为四桨均值），供 HUD / 渲染读取 |
+| | `holdY: number` | 高度保持设定点（米）；松杆时高度位置环把飞机拉回此高度（修复纯速度控制电机上电期下沉） |
 | **驱动** | `update(deltaTime: number): void` | **唯一推进入口** |
 
 > 坐标系（AR 世界系，右手系，米）：**X 右 / Y 上 / Z 朝用户**；机头朝前（远离用户）在 yaw=0 时是 **−Z** 方向。
@@ -178,10 +182,27 @@ const r = planPath(grid, 0, 0, 3.5, 0);
 ### 5.2 真实刚体动力学（dynamics）—— 可选第二内核
 
 `DroneController` 默认走**运动学**内核（对输入积分速度、用速度反推姿态）。
-若仿真器想要"四桨推力 → 力矩 → 姿态 → 位姿"的**真实刚体积分**，直接用：
+若仿真器想要"四桨推力 → 力矩 → 姿态 → 位姿"的**真实刚体积分**，直接开内核即可，
+无需自己拼装级联控制器与混控：
 
 ```ts
-import { FlightDynamics, DEFAULT_DYNAMICS, mixThrusts, DEFAULT_QUAD } from 'uav_flight_sim';
+import { DroneController } from 'uav_flight_sim';
+
+const drone = new DroneController();
+drone.placed = true;
+drone.flying = true;
+drone.setFlightMode(true);   // ← 切换为真实动力学内核（无缝交接当前状态）
+// 之后照常 drive：drone.moveY = 1; drone.update(dt);
+// 读回真实物理量：drone.rotorSpeeds（四桨实际转速）、drone.pitch/roll（由推力矢量反解）
+```
+
+内核内部已串起 `velocityLoop → verticalLoop → dragForce → thrustVector → tiltFromUpDir →
+attitudeTorque → mixThrusts → applyActuatorLimit → RotorPlant（电机一阶滞后）→ FlightDynamics.step`
+的完整链路，子步 `h ≤ 1/240`。想自行接管更底层（例如换增益、接自定义推力分配）时，仍可单独
+`import` 下方三个模块直接使用：
+
+```ts
+import { FlightDynamics, DEFAULT_DYNAMICS, mixThrusts, DEFAULT_QUAD, CascadeController } from 'uav_flight_sim';
 
 const dyn = new FlightDynamics(DEFAULT_DYNAMICS);
 // 由级联控制器算出四个桨的"期望推力"（N），再经混控器做执行器饱和
@@ -191,8 +212,8 @@ dyn.step(h, thrusts, windX, windZ, airDensity);
 // 读回：dyn.vx/vy/vz、dyn.pitch/roll/yaw、dyn.lastThrust、dyn.lastTauPitch/Roll/Yaw
 ```
 
-- 两套内核**并列可选**，不是替换关系；默认运动学路径保证既有真机验证的手感与刹停零回归。
-- 模式切换用 `dyn.syncFrom(...)` 无缝接管，避免跳变。
+- 两套内核**并列可选**，不是替换关系；默认运动学路径（`useDynamics=false`）保证既有真机验证的手感与刹停零回归。
+- 切换用 `drone.setFlightMode(true)` 无缝接管，内部以 `syncFrom(...)` + 重置电机 + `holdY = 当前高度` 避免跳变。
 
 ### 5.3 HUD 威胁推导（telemetry）
 

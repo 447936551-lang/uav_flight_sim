@@ -31,7 +31,7 @@ src/
     Logger.ts           自实现日志（替代 hilog）
     LoggerLevel.ts      日志级别
   model/                飞行动力学状态机（运动学内核）
-    DroneController.ts    飞控状态机 + 速度积分 + 姿态推导
+    DroneController.ts    飞控状态机（运动学 + 真实动力学双内核，setFlightMode 切换）+ 速度积分 + 姿态推导
     WorldObject.ts        AR 世界对象基类（锚定 + 偏移位姿）
   avoidance/            碰撞评估 + 转向力合成
     CollisionDetector.ts  碰撞 / 威胁评估（纯函数）
@@ -55,7 +55,7 @@ src/
 tests/                 vitest 单测 + 零依赖自检 + 仿真黄金用例
 sim/
   sim_flight.ts         无头飞行仿真演示（含 MockPerception）
-  scenarios.ts          M3 场景仿真：五场景确定性冒烟（CI 门禁）
+  scenarios.ts          M3 场景仿真：六场景确定性冒烟（CI 门禁）
 docs/
   design.md             设计说明与验收口径
   simulation.md         M3 脚本化仿真方案（无头 / 确定性 / 黄金值回归 / CI）
@@ -84,8 +84,8 @@ npm run sim        # 运行无头飞行仿真演示
 npm run verify     # 一键：类型校验 + 单测 + 仿真 + 场景 + DCO
 ```
 
-> 场景仿真（`npm run sim:scenarios`）是 M3 新增的 CI 门禁：五场景确定性冒烟覆盖
-> model / avoidance / environment / planning 四个域，任一失败即非零退出。
+> 场景仿真（`npm run sim:scenarios`）是 M3 新增的 CI 门禁：六场景确定性冒烟覆盖
+> model / avoidance / environment / planning / dynamics 五个域，任一失败即非零退出。
 > 脚本化仿真方案与接入指南见 [`docs/simulation.md`](./docs/simulation.md) 与 [`docs/integration.md`](./docs/integration.md)。
 
 > 不装框架也能验收：`npm run selfcheck` 走零依赖自检（直接调用各模块内置 `selfTest()`）。

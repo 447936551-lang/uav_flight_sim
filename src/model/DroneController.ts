@@ -33,7 +33,28 @@ import { Vec3 } from '../core/Vec3';
 import { SpatialPerception } from '../contract/SpatialPerception';
 import { EnvironmentPerception } from '../contract/EnvironmentPerception';
 import { WIND_GAIN } from '../environment/Atmosphere';
-import { positionHoldVelocity } from '../dynamics/CascadeController';
+import {
+  attitudeTorque,
+  dragForce,
+  positionHoldVelocity,
+  thrustVector,
+  tiltFromUpDir,
+  velocityLoop,
+  verticalLoop,
+  yawTorque,
+} from '../dynamics/CascadeController';
+import {
+  DEFAULT_DYNAMICS,
+  FlightDynamics,
+  geometryOf,
+} from '../dynamics/FlightDynamics';
+import {
+  applyActuatorLimit,
+  DEFAULT_QUAD,
+  mixThrusts,
+  QuadGeometry,
+  RotorPlant,
+} from '../dynamics/RotorMixer';
 
 // —— 闭环定点保持（M3 Step1）：复用 CascadeController.positionHoldVelocity ——
 // 与动力学模式的位置环同源：松杆 + 启用环境感知时，把飞机拉回锚点，
@@ -42,6 +63,21 @@ const KIN_WIND_FEEDFORWARD: number = 0.9; // 风扰前馈抵消比例 0..1（留
 const KIN_POS_KP: number = 1.5;           // 位置环增益（1/s），与动力学 DYN_POS_KP 同量级
 const KIN_HOLD_RESP: number = 6.0;        // 保持环速度响应（1/s）
 const KIN_HOLD_AUTHORITY: number = 1.0;   // 保持权限（占 maxSpeed 比例），防异常误差猛冲回锚点
+
+// —— 双内核（M3 Step2）：动力学内核级联增益，与 FlightDynamics / RotorMixer 同源 ——
+// 复用 CascadeController 的 velocityLoop / thrustVector / tiltFromUpDir /
+// attitudeTorque / yawTorque / dragForce，把"摇杆→期望速度→期望推力矢量→混控→
+// 执行器滞后→刚体积分"整条真实飞控链路接进 DroneController。
+const DYN_VEL_KP: number = 4.0;        // 速度环增益（1/s）
+const DYN_MAX_ACCEL: number = 6.0;     // 速度环最大指令加速度（m/s²，受 maxTilt 限幅再约束）
+const DYN_ATT_KP: number = 225.0;      // 姿态环比例增益（与 CascadeController 自检同源）
+const DYN_ATT_KD: number = 30.0;       // 姿态环阻尼增益
+const DYN_YAW_KP: number = 80.0;       // 偏航环增益
+const DYN_ALT_KP: number = 1.2;        // 高度位置环增益（1/s）：松杆定高，与 App DYN_ALT_KP 同源
+const DYN_SUBSTEP_HZ: number = 240;    // 动力学子步频率（半隐式欧拉稳定性要求）
+const DYN_MOTOR_TAU: number = 0.05;    // 电机一阶滞后时间常数（秒），与 RotorPlant 默认一致
+const LAND_TAPER_BAND: number = 0.4;   // 软降落锥形减速带（m）：低于此高度按比例限下降速度
+const LAND_TOUCHDOWN_SPEED: number = 0.12; // 触地速度（m/s）：锥形收敛到的目标下降速度
 
 /**
  * 无人机权威状态（Phase 5 显式物理状态机）。
@@ -257,6 +293,23 @@ export class DroneController {
   public holdX: number = 0;
   public holdZ: number = 0;
   public holdEngaged: boolean = false;
+  /** 高度保持设定点（米）：松杆时高度位置环把飞机拉回此高度（M3 Step2 动力学内核用） */
+  public holdY: number = 0.9;
+
+  /**
+   * 双内核开关（M3 Step2）：true = 真实动力学内核（级联 + 刚体 + 混控 + 执行器滞后），
+   * false（默认）= 运动学内核。**默认 false 时整条动力学链路不介入 → 与旧运动学逐位一致（零回归）**。
+   * 切换经 setFlightMode()，会把当前运动学状态无缝交接给刚体，避免跳变。
+   * 注意：FlightAlgorithm 算法竞技框架（activeAlgo / flightAlgoRegistry）**不纳入社区**，
+   * 本开关只管"内置运动学 ↔ 内置真实动力学"两态。
+   */
+  public useDynamics: boolean = false;
+  /** 刚体动力学实例（懒建，复用 DEFAULT_DYNAMICS）；useDynamics=false 时恒为 null 不占用 */
+  private dynamics: FlightDynamics | null = null;
+  /** 执行器（电机）实例（懒建，tau=DYN_MOTOR_TAU）；负责转速一阶滞后 + 每桨差动 */
+  private rotorPlant: RotorPlant | null = null;
+  /** 四桨实际归一化转速 [FL,FR,BL,BR]，供 HUD / 渲染读取（0..maxRotor） */
+  public rotorSpeeds: number[] = [0, 0, 0, 0];
 
   /**
    * 空间感知输入（"空间感知输入" 契约）。
@@ -407,6 +460,187 @@ export class DroneController {
     }
   }
 
+  /**
+   * 切换飞控内核（M3 Step2）：useDynamics=true → 真实动力学；false（默认）→ 运动学。
+   * 切换时把当前运动学状态**无缝交接**给刚体（速度 / 姿态 / 偏航），电机从停转重新 spool up，
+   * 避免模式跳变。动力学实例与执行器实例懒建，首次切到动力学才分配。
+   */
+  public setFlightMode(useDynamics: boolean): void {
+    this.useDynamics = useDynamics;
+    if (useDynamics) {
+      const d: FlightDynamics = this.dyn();
+      d.syncFrom(this.velX, this.velY, this.velZ,
+        this.pitch * Math.PI / 180, this.roll * Math.PI / 180, this.yaw * Math.PI / 180);
+      this.plant().reset(); // 电机从停转起步，真实 spool-up
+      this.holdY = this.offsetY; // 高度设定点无缝交接当前高度
+    }
+  }
+
+  /** 懒建刚体动力学实例 */
+  private dyn(): FlightDynamics {
+    if (this.dynamics === null) {
+      this.dynamics = new FlightDynamics(DEFAULT_DYNAMICS);
+    }
+    return this.dynamics;
+  }
+
+  /** 懒建执行器（电机）实例 */
+  private plant(): RotorPlant {
+    if (this.rotorPlant === null) {
+      this.rotorPlant = new RotorPlant(DYN_MOTOR_TAU);
+    }
+    return this.rotorPlant;
+  }
+
+  /**
+   * 动力学内核单帧推进（M3 Step2）：把摇杆意图经「速度环 → 推力矢量 → 期望倾角 →
+   * 姿态环 PD → 混控 → 执行器滞后 → 刚体积分」整条真实飞控链路算出来，再回写公开字段。
+   * 与运动学内核互斥（update() 已提前 return）。yaw 仍由运动学通道积分以保持机体轴一致。
+   * 增益经离线闭环仿真验证稳定（scratch_dyn_test.ts）：悬停逐位静止、前进可达速度上限、
+   * 风扰被速度环自然抵消。
+   */
+  private stepDynamics(dt: number, desVX: number, desVZ: number,
+    climbSource: number, yawSource: number,
+    fx: number, fz: number, rx: number, rz: number,
+    p: DroneFlightParams, hasMoveInput: boolean): void {
+    const d: FlightDynamics = this.dyn();
+    const plant: RotorPlant = this.plant();
+    const geo: QuadGeometry = geometryOf(DEFAULT_DYNAMICS);
+    const D = DEFAULT_DYNAMICS;
+    const active: boolean = this.placed && this.flying;
+
+    if (!active) {
+      // 未激活：电机停转、速度衰减、冻结位置（与运动学非激活一致）
+      const k: number = clampValue(decayFactor(p.damping, dt), 0, 1);
+      this.velX *= k; this.velY *= k; this.velZ *= k;
+      this.writeRotorFromPlant(plant, geo, dt);
+      return;
+    }
+
+    // 保持环接合（与运动学同源）：无杆量 + 启用环境感知时定锚点
+    if (!hasMoveInput && this.environmentActive) {
+      if (!this.holdEngaged) {
+        this.holdX = this.offsetX;
+        this.holdZ = this.offsetZ;
+        this.holdEngaged = true;
+      }
+    } else if (!this.environmentActive) {
+      this.holdEngaged = false;
+    }
+
+    // 期望水平速度：有杆量 = 摇杆目标（已含避障）；无杆量且保持接合 = 位置环回锚
+    let cmdVX: number = desVX;
+    let cmdVZ: number = desVZ;
+    if (!hasMoveInput && this.holdEngaged) {
+      const hv: number[] = positionHoldVelocity(this.holdX, this.holdZ,
+        this.offsetX, this.offsetZ, KIN_POS_KP, p.maxSpeed * KIN_HOLD_AUTHORITY);
+      cmdVX = hv[0];
+      cmdVZ = hv[1];
+    }
+
+    // 期望竖直速度：软降落锥形减速 > 手动升降 > 高度位置环（holdY）定高
+    // 高度环是真实飞控的"松杆定高"来源（App DYN_ALT_KP），避免无风时也缓慢掉高。
+    let desVY: number;
+    if (this.landing && !this.flying) {
+      if (this.offsetY < LAND_TAPER_BAND) {
+        // 锥形：越接近地面，目标下降速度越小，触地收敛到 LAND_TOUCHDOWN_SPEED
+        const taper: number = clampValue(this.offsetY / LAND_TAPER_BAND, 0, 1);
+        desVY = -LAND_TOUCHDOWN_SPEED * taper;
+      } else {
+        desVY = -p.climbSpeed;
+      }
+    } else if (climbSource !== 0) {
+      desVY = climbSource * p.climbSpeed;
+      this.holdY = this.offsetY; // 手动升降时设定点跟随，松手即定高
+    } else {
+      desVY = clampValue(-DYN_ALT_KP * (this.offsetY - this.holdY), -p.climbSpeed, p.climbSpeed);
+    }
+
+    const windX: number = this.windVelX;
+    const windZ: number = this.windVelZ;
+    const airDensity: number = this.airDensityFactor;
+    const nSub: number = Math.max(1, Math.ceil(dt * DYN_SUBSTEP_HZ));
+    const h: number = dt / nSub;
+
+    for (let s: number = 0; s < nSub; s++) {
+      // 同步刚体 yaw 到控制器 yaw（机体轴一致），偏航角速度清零（偏航由运动学通道积分）
+      d.yaw = this.yaw * Math.PI / 180;
+      d.wYaw = 0;
+      // 速度环（水平）
+      const vd: number[] = velocityLoop(cmdVX, cmdVZ, d.vx, d.vz, DYN_VEL_KP, DYN_MAX_ACCEL);
+      // 垂直环
+      const ay: number = verticalLoop(desVY, d.vy, DYN_VEL_KP, DYN_MAX_ACCEL);
+      // 相对气流阻力（前馈估计，与 FlightDynamics.step 同源）
+      const rvx: number = d.vx - windX;
+      const rvy: number = d.vy;
+      const rvz: number = d.vz - windZ;
+      const fd: number[] = dragForce(rvx, rvy, rvz, D.dragCoef, airDensity);
+      // 推力矢量（含重力 + 阻力前馈）
+      const tv: number[] = thrustVector(vd[0], ay, vd[1], D.mass, D.gravity, fd[0], fd[1], fd[2]);
+      const T: number = tv[0];
+      // 期望倾角（yaw 对齐机体轴）
+      const tilt: number[] = tiltFromUpDir(tv[1], tv[3], fx, fz, rx, rz, D.maxTiltRad);
+      // 姿态环 PD → 期望力矩（偏航力矩置 0：偏航由运动学通道积分）
+      const tauPitch: number = attitudeTorque(tilt[0], d.pitch, d.wPitch, DYN_ATT_KP, DYN_ATT_KD, D.inertiaTilt);
+      const tauRoll: number = attitudeTorque(tilt[1], d.roll, d.wRoll, DYN_ATT_KP, DYN_ATT_KD, D.inertiaTilt);
+      const tauYaw: number = 0;
+      // 混控 → 执行器限幅 → 电机一阶滞后 → 实际推力
+      const raw: number[] = mixThrusts(T, tauPitch, tauRoll, tauYaw, geo);
+      const limited = applyActuatorLimit(raw, geo, airDensity);
+      const act = plant.update(h, limited.speeds, geo, airDensity);
+      // 刚体积分
+      d.step(h, act.thrusts, windX, windZ, airDensity);
+    }
+
+    // 回写公开字段
+    this.velX = d.vx;
+    this.velY = d.vy;
+    this.velZ = d.vz;
+    this.pitch = d.pitch * 180 / Math.PI;
+    this.roll = d.roll * 180 / Math.PI;
+
+    // 偏航：运动学通道积分（与运动学内核同源），避免刚体 yaw 与机体轴漂移
+    if (yawSource !== 0) {
+      this.yawRate = approachValue(this.yawRate, -yawSource * p.yawSpeed, p.yawAccel * dt);
+    } else {
+      this.yawRate *= decayFactor(p.damping, dt);
+    }
+    this.yaw = normalizeDeg(this.yaw + this.yawRate * dt);
+
+    // 位置积分
+    this.offsetX += this.velX * dt;
+    this.offsetY += this.velY * dt;
+    this.offsetZ += this.velZ * dt;
+
+    // 高度限位（与运动学内核同源：触顶/触底清零对应速度，落地结束降落）
+    if (this.offsetY < p.minHeight) {
+      this.offsetY = p.minHeight;
+      if (this.velY < 0) {
+        this.velY = 0;
+      }
+      if (this.landing) {
+        this.landing = false;
+      }
+    } else if (this.offsetY > p.maxHeight) {
+      this.offsetY = p.maxHeight;
+      if (this.velY > 0) {
+        this.velY = 0;
+      }
+    }
+
+    // 旋翼：由电机实际转速回写（渲染/诊断）
+    this.writeRotorFromPlant(plant, geo, dt);
+  }
+
+  /** 由执行器实际转速回写 rotorSpeed / rotorSpeeds（M3 Step2） */
+  private writeRotorFromPlant(plant: RotorPlant, geo: QuadGeometry, dt: number): void {
+    const sp: number[] = plant.actualSpeeds;
+    this.rotorSpeeds = [sp[0], sp[1], sp[2], sp[3]];
+    const avg: number = (sp[0] + sp[1] + sp[2] + sp[3]) / 4;
+    const target: number = clampValue(avg / geo.maxRotor, 0, 1);
+    this.rotorSpeed += (target - this.rotorSpeed) * clampValue(6 * dt, 0, 1);
+  }
+
   /** 重置到初始位置与姿态（含速度清零） */
   public reset(): void {
     this.offsetX = 0;
@@ -512,7 +746,30 @@ export class DroneController {
       this.avoidEmergency = false;
       this.avoidanceActive = false;
     }
+    // —— 环境风场：由 EnvironmentPerception（第二个契约）每帧读入（M3 Step2 移到分支前，双内核共用）——
+    // 未接入或关闭时，风场与密度一律归零 —— 对运动学**零影响**（零回归硬保证）。
+    if (active && this.environmentActive && this.environment !== null) {
+      const w: Vec3 | null = this.environment.getWindVelocity();
+      this.windVelX = w !== null ? w.x : 0;
+      this.windVelZ = w !== null ? w.z : 0;
+      if (this.environment.getAirDensity !== undefined) {
+        this.airDensityFactor = this.environment.getAirDensity();
+      }
+    } else {
+      this.windVelX = 0;
+      this.windVelZ = 0;
+      this.airDensityFactor = 1.0;
+    }
+
+    // —— 双内核分支（M3 Step2）：useDynamics 时走真实动力学链路（update 提前 return）——
+    // 运动学路径（默认）整段逐位不变；动力学路径在 stepDynamics 内自管积分与姿态。
     const hasMoveInput: boolean = (inputX !== 0) || (inputY !== 0);
+    if (this.useDynamics && this.dynamics !== null) {
+      this.stepDynamics(dt, targetVX, targetVZ, climbSource, yawSource, fx, fz, rx, rz, p, hasMoveInput);
+      this.syncState();
+      return;
+    }
+
     if (hasMoveInput) {
       // 有输入：按「速度矢量」整体限速加速（推背感 / 起步不突兀）。
       // 必须按矢量而不是逐分量限速 —— 逐分量会让对角线方向得到 √2 倍合成加速度。
@@ -577,21 +834,6 @@ export class DroneController {
       this.velY *= decayFactor(p.damping, dt);
     }
 
-    // —— 环境风场：由 EnvironmentPerception（第二个契约）每帧读入 ——
-    // 未接入或关闭时，风场与密度一律归零 —— 对运动学**零影响**，
-    // 与未引入环境层之前的行为逐位一致（零回归的硬保证）。
-    if (active && this.environmentActive && this.environment !== null) {
-      const w: Vec3 | null = this.environment.getWindVelocity();
-      this.windVelX = w !== null ? w.x : 0;
-      this.windVelZ = w !== null ? w.z : 0;
-      if (this.environment.getAirDensity !== undefined) {
-        this.airDensityFactor = this.environment.getAirDensity();
-      }
-    } else {
-      this.windVelX = 0;
-      this.windVelZ = 0;
-      this.airDensityFactor = 1.0;
-    }
     // 风速矢量 → 等效加速度扰动（运动学内核的权宜口径；
     // 动力学内核直接用 windVel 算相对气流阻力，不走这里）
     this.windAccelX = this.windVelX * this.windGain;
@@ -879,6 +1121,45 @@ export class DroneController {
       d.obstacleDistance = Infinity;
       d.update(1 / 60); // 无输入帧
       check('默认（环境关闭）保持环不接合', d.holdEngaged === false);
+    }
+
+    // 10) 双内核开关（M3 Step2）：setFlightMode(true) → useDynamics 生效且懒建刚体
+    {
+      const d: DroneController = new DroneController();
+      d.setFlightMode(true);
+      check('setFlightMode(true) → useDynamics 生效', d.useDynamics === true);
+      check('双内核：动力学实例已懒建', d.dynamics !== null);
+      d.setFlightMode(false);
+      check('setFlightMode(false) → 切回运动学', d.useDynamics === false);
+    }
+
+    // 11) 动力学悬停稳定（M3 Step2）：无输入无风 2s，刚体不漂（offset 仍≈初始）
+    {
+      const d: DroneController = new DroneController();
+      d.placed = true;
+      d.flying = true;
+      d.obstacleDistance = Infinity;
+      d.setFlightMode(true);
+      for (let i = 0; i < 120; i++) {
+        d.update(1 / 60);
+      }
+      check('动力学悬停：水平不漂', Math.abs(d.offsetX) < 0.05 && Math.abs(d.offsetZ) < 0.05);
+      check('动力学悬停：高度守稳（≈0.9m）', Math.abs(d.offsetY - 0.9) < 0.1);
+      check('动力学悬停：姿态收敛（倾角<5°）', Math.abs(d.pitch) < 5 && Math.abs(d.roll) < 5);
+    }
+
+    // 12) 动力学前进可达（M3 Step2）：满前向 1s，offsetZ 明显变负（与运动学同向）
+    {
+      const d: DroneController = new DroneController();
+      d.placed = true;
+      d.flying = true;
+      d.obstacleDistance = Infinity;
+      d.setFlightMode(true);
+      d.moveY = 1; // 满前向
+      for (let i = 0; i < 60; i++) {
+        d.update(1 / 60);
+      }
+      check('动力学前进：满前向位移明显', d.offsetZ < -0.3);
     }
 
     if (fails.length !== 0) {

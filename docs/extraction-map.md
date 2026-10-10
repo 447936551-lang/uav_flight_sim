@@ -8,7 +8,7 @@
 
 | 源 App 模块（.ets） | 库模块（.ts） | 说明 |
 | --- | --- | --- |
-| `ar/DroneController.ets`（运动学内核） | `src/model/DroneController.ts` | 仅搬运动学内核；双内核（真实动力学）切换逻辑留待 M3 |
+| `ar/DroneController.ets`（运动学 + 真实动力学双内核） | `src/model/DroneController.ts` | 运动学内核（默认）+ 真实刚体动力学双内核；`setFlightMode`/`useDynamics` 切换，默认运动学（零回归）；`stepDynamics` 串起级联控制 / 混控 / 执行器一阶滞后 / 刚体积分（v0.3.0 并入） |
 | `ar/WorldObject.ets` | `src/model/WorldObject.ts` | 世界对象基类（锚定 + 偏移位姿） |
 | `ar/CollisionDetector.ets` | `src/avoidance/CollisionDetector.ts` | 碰撞 / 威胁评估（纯函数） |
 | `ar/SteeringBehavior.ets`（含 bypassMode） | `src/avoidance/SteeringBehavior.ts` | 转向避障；商标化能力去商标化为 `bypassMode`；硬停面随速度伸缩（`avoidMarginFor`）、绕行方向按障碍方位择优（`pickAvoidSide`，2026-10-06 同步） |
@@ -29,7 +29,7 @@
 
 | 源 App 模块 | 未纳入原因 |
 | --- | --- |
-| `ar/DroneController.ets`（真实动力学内核 `useDynamics` / `setFlightMode`） | 双内核集成归 M3；当前库内控制器仍为单内核（运动学） |
+| `ar/DroneController.ets`（真实动力学内核 `useDynamics` / `setFlightMode`） | **已于 v0.3.0 纳入**：见上表 `DroneController.ts` 双内核行；默认运动学（零回归） |
 | `algorithms/FlightAlgorithm.ets` + `algorithms/{WaypointFlight,RthFlight,PoiOrbit,ApasAvoidance}.ets` | 算法竞技框架（`FlightAlgorithm` 契约 + 注册表）按项目决策暂不纳入；其中「智能绕障」本体已以 `bypassMode` 并入 `avoidance/SteeringBehavior` |
 | `ai/*`（MindSporeLite 端侧推理） | 依赖 `@kit.MindSporeLiteKit`，属设备能力层 |
 | `service/AlertService.ets` | 依赖 `@kit.SensorServiceKit` / `AudioKit` / `MediaKit`，属 UI 反馈层 |
