@@ -329,6 +329,88 @@ export class RotorPlant {
   }
 }
 
+// —— M4 阶段B · L4 执行器非线性（默认关，零回归）——
+// 在「指令转速(cmd) → 实际转速」之间插入两类真实非线性：
+//   1) 电压跌落（voltage sag）：集总推力需求越大、电池越空，电池压降越大，
+//      所有电机转速**同比例**下降（真实四旋翼「满油门反而给不出」的来源）。
+//   2) 油门曲线（throttle expo）：ESC 对指令的响应并非严格线性，中段更钝；
+//      端点恒等（0→0, 1→1）保证不破坏悬停/饱和语义。
+/** 满油门集总需求时的最大电压跌落比例（→ 满油门稳态推力损失约 sag²） */
+export const ACT_VOLTAGE_SAG_MAX: number = 0.08;
+/** 油门曲线指数（>0 中段更钝：半油门输出 < 0.5·maxRotor） */
+export const ACT_EXPO: number = 0.30;
+/** 低电量时跌落加剧系数（batteryFrac 越小，sagMax 越大） */
+export const ACT_LOW_BATT_BOOST: number = 1.0;
+
+/**
+ * 执行器非线性修正（纯函数，可离线自检）。
+ * 在「指令转速 cmd（已限幅）→ 实际转速」之间插入电压跌落 + 油门曲线。
+ * @param cmd 指令转速（已限幅，0..maxRotor）
+ * @param g 混控几何（提供 kT/maxRotor）
+ * @param collectiveThrust 本帧集总推力需求（N，= mixThrusts 的总和 = T）
+ * @param batteryFrac 电池电量比例 0..1（低电时跌落更明显）
+ * @returns 修正后的指令转速（交给 RotorPlant 做滞后）
+ */
+export function actuatorNonlinearSpeeds(cmd: number[], g: QuadGeometry,
+  collectiveThrust: number, batteryFrac: number = 1): number[] {
+  const maxT: number = 4 * g.kT * g.maxRotor * g.maxRotor;
+  const load: number = clamp(maxT > 0 ? collectiveThrust / maxT : 0, 0, 1);
+  const sagMax: number = ACT_VOLTAGE_SAG_MAX *
+    (1 + (1 - clamp(batteryFrac, 0, 1)) * ACT_LOW_BATT_BOOST);
+  const sag: number = 1 - sagMax * load;
+  const out: number[] = [0, 0, 0, 0];
+  for (let i = 0; i < 4; i++) {
+    const x: number = clamp(cmd[i] / g.maxRotor, 0, 1);
+    const xe: number = x * (1 - ACT_EXPO) + ACT_EXPO * x * x;  // 端点恒等、中段按 expo 变形
+    out[i] = clamp(sag * xe, 0, 1) * g.maxRotor;
+  }
+  return out;
+}
+
+/**
+ * 电压跌落→**可用最高转速** 折算（L4 阶段B）。
+ * ================================================================
+ * 物理本质：电池在负载下电压跌落 → 电机可用最高转速（Kv·V）下降 → 单桨最大
+ * 推力被砍。这是“饱和上限”效应：控制器在常规工作点可完全补偿（多给点转速即可），
+ * 唯独满油门时撞到被压低的天花板，最大推力缩水——这才是真实且不可补偿的效应。
+ * 注意：油门曲线（ACT_EXPO）是**飞行员摇杆**语义，不该作用在控制器推力指令上
+ * （那会凭空饿死悬停点），故本控制路径不采用，仅 actuatorNonlinearSpeeds 作为
+ * “裸指令→实际转速”的前向标定留存。
+ *
+ * @param collectiveThrust 期望集总推力（N），用于算电压跌落 load
+ * @param batteryFrac      电量比例 0..1（低电量→sag 更大）
+ */
+export function effectiveMaxRotor(g: QuadGeometry, collectiveThrust: number,
+  batteryFrac: number = 1): number {
+  const maxT: number = 4 * g.kT * g.maxRotor * g.maxRotor;
+  const load: number = clamp(maxT > 0 ? collectiveThrust / maxT : 0, 0, 1);
+  const sagMax: number = ACT_VOLTAGE_SAG_MAX *
+    (1 + (1 - clamp(batteryFrac, 0,1)) * ACT_LOW_BATT_BOOST);
+  const sag: number = 1 - sagMax * load;
+  return g.maxRotor * sag;
+}
+
+/**
+ * L4 执行器非线性的**补偿**（阶段B 修正版）。
+ * ================================================================
+ * 控制路径：给定期望线性转速 cmd（applyActuatorLimit 输出）与集总推力，
+ * 把指令夹到“电压跌落后的可用最高转速”内。
+ *   · 悬停等工作点（cmd ≪ maxEff）：cmdEff = cmd —— 推力**完全还原**，零回归、
+ *     不破悬停语义（控制器靠反馈补偿了跌落）；
+ *   · 饱和（cmd 撞 maxEff）：cmdEff 被夹到 maxEff —— 满油门实际最大推力被
+ *     sag² 削减，这是电压跌落**真实且不可补偿**的上限（PX4 THR_MDL_FAC 同思路）。
+ * 端点恒等天然保持（cmd=0→0、cmd=maxRotor→夹到 maxEff）。
+ */
+export function invertActuatorNonlinear(cmd: number[], g: QuadGeometry,
+  collectiveThrust: number, batteryFrac: number = 1): number[] {
+  const maxEff: number = effectiveMaxRotor(g, collectiveThrust, batteryFrac);
+  const out: number[] = [0, 0, 0, 0];
+  for (let i = 0; i < 4; i++) {
+    out[i] = clamp(cmd[i], 0, maxEff);
+  }
+  return out;
+}
+
 export function selfTest(): void {
   const fails: string[] = [];
   let total: number = 0;
@@ -411,6 +493,51 @@ export function selfTest(): void {
     check('稀薄空气 → 悬停转速更高', high.speeds[0] > sea.speeds[0] + 0.01);
     check('稀薄空气 → 同样转速给出的推力更小',
       g.kT * 0.85 * sea.speeds[0] * sea.speeds[0] < 0.3);
+  }
+
+  // 9) M4 阶段B · L4 执行器非线性：端点恒等、单调、油门曲线、电压跌落
+  {
+    const g2: QuadGeometry = DEFAULT_QUAD;
+    const maxT: number = 4 * g2.kT * g2.maxRotor * g2.maxRotor;
+    // 9a) 端点恒等：零集总需求(sag=1)时，cmd 不动（不破坏饱和/悬停语义）
+    {
+      const e0: number[] = actuatorNonlinearSpeeds([0, 0, 0, 0], g2, 0, 1);
+      const e1: number[] = actuatorNonlinearSpeeds(
+        [g2.maxRotor, g2.maxRotor, g2.maxRotor, g2.maxRotor], g2, 0, 1);
+      check('非线性·零集总：cmd=0→0', Math.abs(e0[0]) < 1e-12);
+      check('非线性·零集总：cmd=max→max（端点恒等，不破坏饱和）',
+        Math.abs(e1[0] - g2.maxRotor) < 1e-12);
+    }
+    // 9b) 单调：cmd 增大 → 输出不减
+    {
+      const a: number[] = actuatorNonlinearSpeeds([0.2, 0.2, 0.2, 0.2], g2, 0, 1);
+      const b: number[] = actuatorNonlinearSpeeds([0.6, 0.6, 0.6, 0.6], g2, 0, 1);
+      check('非线性·单调：输出随 cmd 增大', b[0] > a[0] + 1e-9);
+    }
+    // 9c) 油门曲线：中段比线性钝（expo>0，半油门输出 < 0.5·max）
+    {
+      const half: number[] = actuatorNonlinearSpeeds(
+        [0.5 * g2.maxRotor, 0.5 * g2.maxRotor, 0.5 * g2.maxRotor, 0.5 * g2.maxRotor], g2, 0, 1);
+      check('非线性·油门曲线：中段比线性钝(半油门<0.5·max)',
+        half[0] < 0.5 * g2.maxRotor - 1e-9);
+    }
+    // 9d) 电压跌落：满集总需求 → 全油门输出 = (1-sag)·max（推力损失）
+    {
+      const full: number[] = actuatorNonlinearSpeeds(
+        [g2.maxRotor, g2.maxRotor, g2.maxRotor, g2.maxRotor], g2, maxT, 1);
+      const expect: number = g2.maxRotor * (1 - ACT_VOLTAGE_SAG_MAX);
+      check('非线性·电压跌落：满油门输出 = (1-sag)·max',
+        Math.abs(full[0] - expect) < 1e-9);
+      check('非线性·电压跌落：满油门确实损失转速', full[0] < g2.maxRotor - 1e-9);
+    }
+    // 9e) 低电量加剧跌落：同样满集总，batteryFrac=0.2 比 1.0 输出更小
+    {
+      const lo: number[] = actuatorNonlinearSpeeds(
+        [g2.maxRotor, g2.maxRotor, g2.maxRotor, g2.maxRotor], g2, maxT, 0.2);
+      const hi: number[] = actuatorNonlinearSpeeds(
+        [g2.maxRotor, g2.maxRotor, g2.maxRotor, g2.maxRotor], g2, maxT, 1.0);
+      check('非线性·低电量：跌落更大（输出更小）', lo[0] < hi[0] - 1e-9);
+    }
   }
 
   if (fails.length !== 0) {

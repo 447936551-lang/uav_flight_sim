@@ -32,6 +32,39 @@ import {
   QuadGeometry,
   torquesFromThrusts
 } from './RotorMixer';
+import { bodyDragForce } from './CascadeController';
+
+/**
+ * 地面效应（Ground Effect）—— 真实飞行的起降手感
+ * ---------------------------------------------------------------
+ * 物理：旋翼下洗气流撞到地面后被阻挡、在机身与地面之间形成高压区，
+ * 于是**同样转速能产生更大升力**（贴地时可达 +20~30%），
+ * 同时诱导阻力下降 —— 这就是真机「贴地时会飘、离地瞬间会沉一下」的成因。
+ *
+ * 作用范围：约 1~2 个旋翼直径。本工程整机含桨约 0.37m，取 0.5m 为
+ * 地效完全消失的高度；贴地（离地 0）时增益最大。
+ */
+/** 地效完全消失的离地高度（m） */
+export const GE_RANGE_M: number = 0.5;
+/** 贴地时的最大推力增益（0.25 = +25% 升力） */
+export const GE_MAX_GAIN: number = 0.25;
+
+/**
+ * 地面效应推力增益系数（纯函数，可离线自检）。
+ * @param heightM 离地高度（m，相对放置面/地面）
+ * @returns 推力放大系数（1.0 = 无地效；最大 1 + GE_MAX_GAIN）
+ *
+ * 衰减：二次平滑 —— 贴地增益最大，接近 GE_RANGE_M 时快速消失。
+ * 超过作用范围恒为 1.0（零影响，保证高空飞行手感完全不变）。
+ */
+export function groundEffectFactor(heightM: number): number {
+  if (!isFinite(heightM) || heightM >= GE_RANGE_M) {
+    return 1;
+  }
+  const h: number = heightM <= 0 ? 0 : heightM;
+  const t: number = 1 - h / GE_RANGE_M;
+  return 1 + GE_MAX_GAIN * t * t;
+}
 
 /** 刚体与气动参数 */
 export interface DynamicsParams {
@@ -53,8 +86,16 @@ export interface DynamicsParams {
   inertiaYaw: number;
   /** 气动角阻尼系数（1/s）：抑制角速度，等效真实机身的阻尼力矩 */
   angularDamping: number;
-  /** 平动阻力系数 c（N·(s/m)²）：已含 ½·Cd·A·ρ₀ */
+  /** 平动阻力系数 c（N·(s/m)²）：各向同性阻力模型的单一系数（basic 模型用） */
   dragCoef: number;
+  /** 机体气动矩阵 · 机头前后方向阻力面积 cda（流线型，最小）—— enhanced 模型用 */
+  cdaForward: number;
+  /** 机体气动矩阵 · 机体左右方向阻力面积 cda（平板，最大）—— enhanced 模型用 */
+  cdaSide: number;
+  /** 机体气动矩阵 · 上下（推力轴）方向阻力面积 cda（介于两者之间）—— enhanced 模型用 */
+  cdaUp: number;
+  /** 单桨半径（m）：用于动量理论诱导速度 / 桨盘面积（enhanced 模型 + 入流） */
+  rotorRadius: number;
   /** 最大允许倾角（rad）：期望倾角解算后的硬限幅 */
   maxTiltRad: number;
 }
@@ -73,6 +114,13 @@ export const DEFAULT_DYNAMICS: DynamicsParams = {
   angularDamping: 6.0,
   // 5m/s 相对气流 → 0.1N 阻力（≈0.83 m/s²，约 5° 倾角即可抵消），量级真实且可见
   dragCoef: 0.004,
+  // 机体气动矩阵（enhanced 模型）：forward 流线型最小、side 平板最大、up 居中。
+  // 量级与 basic 的 dragCoef=0.004 对齐（forward 取相同值，保证前飞手感不变；
+  // side 取 3× 使侧风阻力更真实，up 居中）。
+  cdaForward: 0.004,
+  cdaSide: 0.012,
+  cdaUp: 0.010,
+  rotorRadius: 0.045,
   maxTiltRad: 20 * Math.PI / 180
 };
 
@@ -186,7 +234,7 @@ export class FlightDynamics {
    * @param airDensity 空气密度相对因子（标准海平面 = 1.0）
    */
   public step(h: number, thrusts: number[], windX: number, windZ: number,
-    airDensity: number): void {
+    airDensity: number, groundEffect: number = 1, enhancedAero: boolean = false): void {
     const p: DynamicsParams = this.params;
 
     // ── 转动：四桨实际力矩 → 角加速度 → 角速度 → 姿态 ──
@@ -213,6 +261,10 @@ export class FlightDynamics {
     for (let i = 0; i < 4; i++) {
       T += thrusts[i];
     }
+    // 地面效应：贴地时同样转速产生更大升力（下洗气流被地面挡住形成高压区）。
+    // 只放大**升力**，不放大力矩 —— 力矩由四桨差值决定，地效对差动影响极小。
+    const ge: number = isFinite(groundEffect) && groundEffect > 0 ? groundEffect : 1;
+    T = T * ge;
     this.lastThrust = T;
 
     const u: number[] = this.upVector();
@@ -220,11 +272,22 @@ export class FlightDynamics {
     const rvx: number = this.vx - windX;
     const rvy: number = this.vy;
     const rvz: number = this.vz - windZ;
-    const rs: number = Math.sqrt(rvx * rvx + rvy * rvy + rvz * rvz);
-    const dk: number = p.dragCoef * clamp(airDensity, 0.4, 1.6);
-    const fdx: number = -dk * rs * rvx;
-    const fdy: number = -dk * rs * rvy;
-    const fdz: number = -dk * rs * rvz;
+    let fdx: number;
+    let fdy: number;
+    let fdz: number;
+    if (enhancedAero) {
+      // 机体气动矩阵 + 入流（阶段B）：按机体三轴分解相对气流，各轴用不同阻力面积，
+      // 并叠加动量理论诱导速度（仅在确有运动时，悬停不重复计阻力）。
+      const fd: number[] = bodyDragForce(rvx, rvy, rvz, u[0], u[1], u[2], this.yaw,
+        airDensity, p.cdaForward, p.cdaSide, p.cdaUp, this.lastThrust,
+        this.diskArea());
+      fdx = fd[0]; fdy = fd[1]; fdz = fd[2];
+    } else {
+      // 各向同性二次阻力（basic 模型，默认，零回归）
+      const rs: number = Math.sqrt(rvx * rvx + rvy * rvy + rvz * rvz);
+      const dk: number = p.dragCoef * clamp(airDensity, 0.4, 1.6);
+      fdx = -dk * rs * rvx; fdy = -dk * rs * rvy; fdz = -dk * rs * rvz;
+    }
 
     const m: number = p.mass;
     const ax: number = (T * u[0] + fdx) / m;
@@ -243,8 +306,14 @@ export class FlightDynamics {
     return this.params.mass * this.params.gravity / uy;
   }
 
+  /** 四桨总桨盘面积（m²）= 4 · π · r² —— 用于动量理论诱导速度与入流 */
+  public diskArea(): number {
+    return 4 * Math.PI * this.params.rotorRadius * this.params.rotorRadius;
+  }
+
   /**
-   * 纯函数自检。覆盖：无风悬停平衡、自由落体、风致漂移方向、抬头→后退。
+   * 纯函数自检。覆盖：无风悬停平衡、自由落体、风致漂移方向、抬头→后退、
+   * 正俯仰力矩、地面效应增益曲线与升力放大。
    */
   public static selfTest(): void {
     const fails: string[] = [];
@@ -310,6 +379,34 @@ export class FlightDynamics {
         hoverPerRotor - 0.08, hoverPerRotor - 0.08];
       d.step(h, t, 0, 0, 1.0);
       check('前桨加力 → 机头上仰（pitch>0）', d.pitch > 0);
+    }
+
+    // 6) 地面效应：贴地增益最大、超范围恒为 1、区间内单调递减、异常值安全回落
+    {
+      check('地效 · 贴地（h=0）增益 = 1+GE_MAX_GAIN',
+        Math.abs(groundEffectFactor(0) - (1 + GE_MAX_GAIN)) < 1e-9);
+      check('地效 · 负高按贴地处理（不超上限）',
+        Math.abs(groundEffectFactor(-0.3) - (1 + GE_MAX_GAIN)) < 1e-9);
+      check('地效 · 半高（h=0.25）增益 = 1+GE_MAX_GAIN/4',
+        Math.abs(groundEffectFactor(0.25) - (1 + GE_MAX_GAIN * 0.25)) < 1e-9);
+      check('地效 · 超出作用范围（h>=GE_RANGE_M）恒为 1',
+        groundEffectFactor(GE_RANGE_M) === 1 && groundEffectFactor(5) === 1);
+      check('地效 · 非有限值（NaN/Inf）安全回落为 1',
+        groundEffectFactor(NaN) === 1 && groundEffectFactor(Infinity) === 1);
+      check('地效 · 区间内单调递减',
+        groundEffectFactor(0.1) > groundEffectFactor(0.2)
+        && groundEffectFactor(0.2) > groundEffectFactor(0.4));
+    }
+
+    // 7) 地效确实放大升力：同推力贴地上升快于高空
+    {
+      const dLow: FlightDynamics = new FlightDynamics(p);
+      const dHigh: FlightDynamics = new FlightDynamics(p);
+      const tUp: number[] = [hoverPerRotor * 1.5, hoverPerRotor * 1.5,
+        hoverPerRotor * 1.5, hoverPerRotor * 1.5];
+      dLow.step(h, tUp, 0, 0, 1.0, groundEffectFactor(0));
+      dHigh.step(h, tUp, 0, 0, 1.0, groundEffectFactor(5));
+      check('地效 · 同推力贴地上升更快（vy 更大）', dLow.vy > dHigh.vy);
     }
 
     if (fails.length !== 0) {
