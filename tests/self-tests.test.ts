@@ -11,6 +11,13 @@ import { selfTest as meshGridSelfTest } from '../src/planning/MeshGrid';
 import { selfTest as atmosphereSelfTest } from '../src/environment/Atmosphere';
 import { selfTest as weatherCodeSelfTest } from '../src/environment/WeatherCode';
 
+// ── M4/M5 保真层（与 App 端 ARDroneSession 自检链同序）────────────
+import { SeedPRNG } from '../src/core/SeedPRNG';
+import { EkfEstimator } from '../src/dynamics/EkfEstimator';
+import { SensorModel } from '../src/dynamics/SensorModel';
+import { selfTest as turbulenceSelfTest } from '../src/environment/Turbulence';
+import { selfTest as px4ParamsSelfTest } from '../src/dynamics/Px4Params';
+
 /**
  * 复用各模块内置的纯函数自检（selfTest）。
  * 这些自检随代码一起演进，覆盖核心物理与状态机性质，是"零框架也能验收"的基础。
@@ -68,5 +75,27 @@ describe('in-code selfTest (environment)', () => {
 
   it('WeatherCode.selfTest 不抛错', () => {
     expect(() => weatherCodeSelfTest()).not.toThrow();
+  });
+
+  it('Turbulence.selfTest 不抛错', () => {
+    expect(() => turbulenceSelfTest()).not.toThrow();
+  });
+});
+
+describe('in-code selfTest (M4/M5 保真层)', () => {
+  it('SeedPRNG.selfTest 不抛错', () => {
+    expect(() => SeedPRNG.selfTest()).not.toThrow();
+  });
+
+  it('EkfEstimator.selfTest 不抛错', () => {
+    expect(() => EkfEstimator.selfTest()).not.toThrow();
+  });
+
+  it('SensorModel.selfTest 不抛错', () => {
+    expect(() => SensorModel.selfTest()).not.toThrow();
+  });
+
+  it('Px4Params.selfTest 不抛错', () => {
+    expect(() => px4ParamsSelfTest()).not.toThrow();
   });
 });

@@ -15,6 +15,13 @@ import { selfTest as meshGridSelfTest } from '../src/planning/MeshGrid';
 import { selfTest as atmosphereSelfTest } from '../src/environment/Atmosphere';
 import { selfTest as weatherCodeSelfTest } from '../src/environment/WeatherCode';
 
+// ── M4/M5 保真层（与 App 端 ARDroneSession 自检链同序）────────────
+import { SeedPRNG } from '../src/core/SeedPRNG';
+import { EkfEstimator } from '../src/dynamics/EkfEstimator';
+import { SensorModel } from '../src/dynamics/SensorModel';
+import { selfTest as turbulenceSelfTest } from '../src/environment/Turbulence';
+import { selfTest as px4ParamsSelfTest } from '../src/dynamics/Px4Params';
+
 let failed = false;
 function run(name: string, fn: () => void | string): void {
   try {
@@ -57,6 +64,19 @@ run('MeshGrid', () => meshGridSelfTest());
 // ── 环境层 ──────────────────────────────────────────────────────
 run('Atmosphere', () => atmosphereSelfTest());
 run('WeatherCode', () => weatherCodeSelfTest());
+
+// ── M4/M5 保真层 ────────────────────────────────────────────────
+run('SeedPRNG', () => {
+  SeedPRNG.selfTest();
+});
+run('Turbulence', () => turbulenceSelfTest());
+run('EkfEstimator', () => {
+  EkfEstimator.selfTest();
+});
+run('SensorModel', () => {
+  SensorModel.selfTest();
+});
+run('Px4Params', () => px4ParamsSelfTest());
 
 if (failed) {
   process.exit(1);
