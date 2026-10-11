@@ -1586,6 +1586,33 @@ export class DroneController {
         Math.abs(d3.pitch) < 2 && Math.abs(d3.roll) < 2);
     }
 
+    // 16) 定点保持 ↛ 绕过防撞（行为层）：硬停面内松杆悬停，飞机不得继续朝障碍移动。
+    //     阈值口径：硬停面**随速度伸缩**（avoidMarginFor），静止时 = AVOID_MARGIN_BASE_M = 0.25m。
+    //     本用例早先取 0.3m 并注「< 0.4」，沿用改动前的固定阈值口径 —— 松杆后速度归零，
+    //     硬停面收缩到 0.25m，0.3m 实际落在**减速带内**而非硬停面内，急停判定永不成立，
+    //     真机自检因此报「硬停面内松杆悬停 → 急停判定成立」失败。故改取 0.2m（与用例 3 同口径）。
+    {
+      const d: DroneController = new DroneController();
+      d.placed = true;
+      d.flying = true;
+      d.avoidanceEnabled = true;
+      d.environmentActive = true;         // 真机默认：环境感知开启 → 定点保持生效
+      d.obstacleDistance = 0.2;           // 静止硬停面内（< 0.25）
+      d.moveY = 1;
+      for (let i = 0; i < 30; i++) {
+        d.update(1 / 60);                 // 有输入：锚点跟随位姿
+      }
+      d.moveY = 0;                        // 松杆：定点保持接合
+      const zAtRelease: number = d.offsetZ;
+      for (let i = 0; i < 180; i++) {
+        d.update(1 / 60);
+      }
+      check('硬停面内松杆悬停 → 急停判定成立', d.avoidEmergency === true);
+      check('硬停面内松杆悬停 ↛ 被推向障碍',
+        d.offsetZ >= zAtRelease - 0.02);
+      check('硬停面内松杆悬停 → 速度归零', d.speed < 0.06);
+    }
+
     if (fails.length !== 0) {
       throw new Error(`DroneController 状态机自检失败：${fails.join('、')}`);
     }
