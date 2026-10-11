@@ -1,0 +1,7 @@
+M4 阶段D（L5 自主EKF + L6 传感器噪声）离线验证
+生成时间：2026-10-11T14:11:19.314Z
+源码常数：EKF.accelNoise=0.35, EKF.gyroNoise=0.015
+
+ALL PASS
+
+断言：20/20

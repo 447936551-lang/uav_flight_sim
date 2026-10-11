@@ -30,8 +30,9 @@ src/
     Vec3.ts             自实现三维向量（替代 ArkGraphics3D.Vec3）
     Logger.ts           自实现日志（替代 hilog）
     LoggerLevel.ts      日志级别
+    SeedPRNG.ts         Mulberry32 + Box-Muller 种子化 PRNG（L3/L6 公共随机源）
   model/                飞行动力学状态机（运动学内核）
-    DroneController.ts    飞控状态机（运动学 + 真实动力学双内核，setFlightMode 切换）+ 速度积分 + 姿态推导
+    DroneController.ts    飞控状态机（运动学 + 真实动力学双内核，setFlightMode 切换）+ 速度积分 + 姿态推导 + M4/M5 保真层开关
     WorldObject.ts        AR 世界对象基类（锚定 + 偏移位姿）
   avoidance/            碰撞评估 + 转向力合成
     CollisionDetector.ts  碰撞 / 威胁评估（纯函数）
@@ -39,13 +40,17 @@ src/
   dynamics/             真实刚体动力学（v0.2.0 新增）
     RotorMixer.ts         四旋翼混控 + 执行器饱和 + 电机一阶滞后
     FlightDynamics.ts     刚体动力学积分器（半隐式欧拉）
-    CascadeController.ts  级联控制：位置环 / 速度环 / 姿态环（纯函数）
+    CascadeController.ts  级联控制：位置环 / 速度环 / 姿态环（纯函数）+ L1/L2 扩展
+    EkfEstimator.ts       误差状态 EKF（15 状态，L5）
+    SensorModel.ts        传感器噪声 / 丢包模型（L6）
+    Px4Params.ts          PX4 公开默认参数 → 本仓增益 / EKF 噪声映射（M5-1）
   planning/             占用栅格与路径规划（v0.2.0 新增）
     PathPlanner.ts        世界平面 → 2.5D 栅格 → A* → 可见性平滑
     MeshGrid.ts           场景 mesh → 占用栅格（平面栅格的替代数据源）
   environment/          大气换算与天气归一化（v0.2.0 新增）
     Atmosphere.ts         风矢量 / 空气密度 / 低通平滑 / 阵风
     WeatherCode.ts        风速单位折算 / 异常值防护 / WMO 代码
+    Turbulence.ts         种子化 OU 湍流风（L3，σ≈1.2 m/s、τ=0.5s）
   telemetry/            对外可观测状态推导
     HudModel.ts          HUD 威胁等级 / 配色 / 文案（纯函数）
   contract/             输入契约（纯接口）
@@ -56,6 +61,7 @@ tests/                 vitest 单测 + 零依赖自检 + 仿真黄金用例
 sim/
   sim_flight.ts         无头飞行仿真演示（含 MockPerception）
   scenarios.ts          M3 场景仿真：六场景确定性冒烟（CI 门禁）
+  sim_high_fidelity.ts  M4/M5 高保真层端到端验证（速率环/气动/湍流/EKF，CI 门禁）
 docs/
   design.md             设计说明与验收口径
   simulation.md         M3 脚本化仿真方案（无头 / 确定性 / 黄金值回归 / CI）
@@ -81,7 +87,8 @@ npm install        # 安装 typescript / vitest / tsx
 npm run typecheck  # tsc 类型校验（无输出即通过）
 npm test           # 运行 vitest 单测
 npm run sim        # 运行无头飞行仿真演示
-npm run verify     # 一键：类型校验 + 单测 + 仿真 + 场景 + DCO
+npm run sim:hf     # M4/M5 高真度层端到端验证（40 项断言）
+npm run verify     # 一键：类型校验 + 单测 + 仿真 + 场景 + 高保真 + DCO
 ```
 
 > 场景仿真（`npm run sim:scenarios`）是 M3 新增的 CI 门禁：六场景确定性冒烟覆盖
@@ -164,7 +171,9 @@ class MyWindSource implements EnvironmentPerception {
 | M2 能力剥离与重构 | `core`/`model`/`avoidance`/`telemetry`/`contract` 五模块 + 单测 + 仿真黄金用例入 CI | ✅ 完成 |
 | M2+ 第二批剥离 | `dynamics`（刚体动力学）/ `planning`（A\* 规划）/ `environment`（大气）三模块 + `EnvironmentPerception` 契约 | ✅ 完成（v0.2.0） |
 | M3 仿真方案与文档 | 脚本化仿真方案（`docs/simulation.md`）、场景示例（`sim/scenarios.ts`）、接入指南（`docs/integration.md`，含对接 Simulator SIG） | ✅ 完成（v0.2.4） |
-| M4 毕业准备 | 架构 SIG 毕业评审材料、QA SIG 准出材料 | ⏳ 待办 |
+| M4 高保真层 | `core/SeedPRNG` / `environment/Turbulence`(L3) / `dynamics/EkfEstimator`(L5) / `dynamics/SensorModel`(L6) + `DroneController` L1/L2/L4 接线，全部默认关 | ✅ 完成（v0.4.0） |
+| M5 标定与回放 | `dynamics/Px4Params`（PX4 参数映射，静态标定）+ ULog 回放夹具 + 指标标定 | ✅ 完成（v0.4.0） |
+| M6 毕业准备 | 架构 SIG 毕业评审材料、QA SIG 准出材料 | ⏳ 待办 |
 
 > v0.2.0 属**超出原提案范围**的新增能力（原提案 M1–M4 未含刚体动力学与路径规划）。
 > 向上游贡献时会作为新增交付物一并申报。详见 `CHANGELOG.md`。

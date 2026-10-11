@@ -1,0 +1,73 @@
+M4 阶段B 离线模拟结果（增强气动 L2 + 执行器非线性 L4）
+==========================================================
+生成时间：2026-10-11T14:11:18.385Z
+源码常数：ACT_VOLTAGE_SAG_MAX=0.08 ACT_EXPO=0.3 ACT_LOW_BATT_BOOST=1
+          GE_RANGE_M=0.5 GE_MAX_GAIN=0.25
+          cdaForward=0.004 cdaSide=0.012 cdaUp=0.01 rotorRadius=0.045
+          mass=0.12 g=9.81 I_t=0.0014 I_y=0.0026
+
+
+常数（解析自源码）
+  GE_RANGE_M=0.5 GE_MAX_GAIN=0.25
+  ACT_VOLTAGE_SAG_MAX=0.08 ACT_EXPO=0.3 ACT_LOW_BATT_BOOST=1
+  cdaForward=0.004 cdaSide=0.012 cdaUp=0.01 rotorRadius=0.045
+  mass=0.12 g=9.81 I_t=0.0014 c=0.004 maxTilt=20°
+
+① 纯函数·执行器非线性(L4)：端点恒等 / 单调 / 油门曲线 / 电压跌落 / 低电量
+  [PASS] 端点恒等·零集总：cmd=0→0
+  [PASS] 端点恒等·零集总：cmd=max→max（不破坏饱和）
+  [PASS] 单调：输出随 cmd 增大
+  [PASS] 油门曲线：中段比线性钝(半油门<0.5·max)
+  [PASS] 电压跌落：满油门输出 = (1-sag)·max
+  [PASS] 电压跌落：满油门确实损失转速
+  [PASS] 低电量：跌落更大（输出更小）
+
+①b 逆模型(L4)：悬停不破 / 电压跌落削最大推力 / 低电量加剧
+  [PASS] 逆模型：悬停点 cmdEff=cmd（不破悬停语义）
+  [PASS] 逆模型：悬停点 cmdEff 未超 maxEff
+  [PASS] 逆模型：满油门指令被夹到 maxEff（电压跌落限幅）
+  [PASS] 逆模型：满油门实际最大推力被 sag² 削减(< maxT)
+  [PASS] 逆模型：满油门削减≈sag²
+  [PASS] 逆模型：低电量 maxEff 更低（跌落加剧）
+
+② 纯函数·增强气动(L2)：方向 / 风向反转 / 悬停零阻 / 入流 / 区别于各向同性
+  [PASS] 方向：+X 风 → −X 阻力
+  [PASS] 气动矩阵：侧向阻力幅值 > 前向(cdaS>cdaF)
+  [PASS] 风向反转：阻力随之反向
+  [PASS] 悬停零相对风 → 零阻力
+  [PASS] 入流：有推力时上轴出现诱导阻力(Fy<0)
+  [PASS] 入流：无推力(T=0)时上轴零诱导阻力
+  [PASS] 区别于 basic：侧向阻力幅值 ≠ isotropic
+
+③ 纯物理自由飞行：增强气动矩阵确实改变减速（区别于 basic）
+  [PASS] 自由飞行：增强(侧)减速更快 → |dvx| 更小
+  [PASS] 自由飞行：两分支都在减速(|dvx|<5)
+
+④-a 零回归基线（默认 basic+linear，对照 sim_dynamics/rate_loop）
+  [PASS] 默认：悬停漂移<5cm
+  [PASS] 默认：悬停高度保持<3cm
+  [PASS] 默认：姿态水平(|pitch|,|roll|<2°)
+
+④-b 增强气动(L2) 端到端：开启后稳定 + 不破坏行为
+  [PASS] 增强：悬停稳定（漂移<5cm）
+  [PASS] 增强：悬停高度保持（偏差<3cm）
+  [PASS] 增强：姿态水平(|pitch|,|roll|<2°)
+    (满前向峰值低头 peakNose=-15.36°，Δz=-2.34m)
+  [PASS] 增强：满前向低头(pitch<-1.5°，确为机头下俯)
+  [PASS] 增强：前向确实平移（|Δz|>0.3m）
+  [PASS] 增强：松手停稳(<0.1m/s)
+    (侧风4m/s稳态倾角 basic=3.67° enh=9.76°)
+  [PASS] 增强：侧风定点稳态倾角 > basic（更高侧向阻力→需更大修正）
+
+④-c 执行器非线性(L4) 端到端：开启后稳定 + 链路接通
+  [PASS] 非线性：悬停稳定（漂移<5cm）
+  [PASS] 非线性：悬停高度保持（偏差<3cm）
+  [PASS] 非线性：姿态水平(|pitch|,|roll|<2°)
+  [PASS] 非线性：悬停点 cmdEff==cmd（sag 不破悬停，仅在天花板生效）
+  [PASS] linear 对照：cmdEff == cmd（零回归）
+
+④-d 组合（增强+非线性 同开）稳定
+  [PASS] 组合：悬停稳定（漂移<5cm）
+  [PASS] 组合：悬停高度保持（偏差<3cm）
+
+断言汇总：39/39 通过 —— ALL PASS

@@ -6,6 +6,117 @@
 
 ---
 
+## [0.4.0] — 2026-10-11
+
+M4 高保真层（L1–L6）+ M5（PX4 参数映射 / ULog 回放 / 指标标定）—— 把 App 侧「保真度可选」的六层物理与三件标定夹具以**默认关闭、零回归**的方式并入本仓。
+
+> 背景：本仓自 0.3.0 起已含 `DroneController` 双内核（运动学 ↔ 真实刚体动力学），
+> 但物理粒度仍偏"教科书式"：各向同性二次阻力、瞬时线性执行器、无湍流、无状态估计。
+> 真机的「阵风抖动」「油门到底转速上不去」「估计与真值的偏差」等**高保真行为**无法在库内复现。
+> 本次按 L1→L6 逐层叠加，每层独立开关、默认关闭，仅在显式启用时介入 ——
+> 于是**默认飞行手感与 0.3.0 逐位一致**（由黄金值与既有单测守门）。
+
+### Added（新增）
+
+**`src/core/SeedPRNG.ts` — 种子化 PRNG（L3/L6 公共底座）**
+
+| 导出 | 说明 |
+| --- | --- |
+| `SeedPRNG` | Mulberry32（uint32）+ Box-Muller（带 spare 缓存）标准正态；`reset(seed)` / `nextU32` / `nextFloat` / `nextRange` / `nextGaussian` / `static selfTest` |
+
+- 同种子 ⇒ 同序列（逐位），故湍流 / 传感器噪声可复现、可回归、可回放。
+
+**`src/environment/Turbulence.ts` — L3 种子化湍流风（OU 过程）**
+
+| 导出 | 说明 |
+| --- | --- |
+| `DEFAULT_TURBULENCE_SIGMA = 1.2` / `DEFAULT_TURBULENCE_TAU = 0.5` | 稳态 σ ≈ 1.2 m/s、相关时间 0.5 s（中等湍流基准） |
+| `TurbWind { wx, wz }` | 水平风扰动分量 |
+| `TurbulenceModel` | `constructor(seed, intensity = 1.0, tau, baseSigma)` + `update(dt)` 推进 OU 过程 |
+
+**`src/dynamics/EkfEstimator.ts` — L5 误差状态 EKF（15 状态）**
+
+| 导出 | 说明 |
+| --- | --- |
+| `EkfEstimator` | 名义状态（p/v/q/bg/ba）+ 15×15 误差协方差；`step(dt, imu, obs?)` → `predict` + 观测更新 |
+| `quatFromEuler(yaw, pitch, roll)` / `quatToRot(q)` | 姿态 ↔ 旋转矩阵（[w,x,y,z] 约定） |
+| `ImuSample` / `EkfConfig` / `DEFAULT_EKF` / `static selfTest` | 观测输入契约 / 噪声配置 / 自检 |
+
+**`src/dynamics/SensorModel.ts` — L6 传感器噪声**
+
+| 导出 | 说明 |
+| --- | --- |
+| `SensorModel` | `imu(truthGyro, truthAccel)` / `observePos(truthPos)` / `observeVel(truthVel)`；种子化加噪 + 丢包 |
+| `PosObservation` / `VelObservation` / `static selfTest` | `{ pos, available }` / `{ vel, available }` / 自检 |
+
+**`src/dynamics/Px4Params.ts` — M5-1 PX4 参数映射（静态标定真值源）**
+
+| 导出 | 说明 |
+| --- | --- |
+| `PX4_STOCK: Px4StockParams` | PX4 公开参数参考（release/1.14）真实默认值 |
+| `PX4_ATT_GAIN_SCALE = 1.875` / `PX4_YAW_GAIN_SCALE = 8.0/2.8` / `PX4_STIFFNESS_TARGET = 225.0` | 等刚度标定锚点 |
+| `deriveControllerGains(p)` / `px4EkfConfig(p)` / `selfTest()` | 推导本仓级联增益 / EKF 噪声 / 防漂移自检 |
+
+**`src/model/DroneController.ts` — M4/M5 集成（保真层开关 + 一键预设）**
+
+| 公开符号 | 说明 |
+| --- | --- |
+| `useRateLoop: boolean` | L1 速率环内环（默认 `false`）；开启后姿态链路变为「角度→角速度→力矩」级联 |
+| `aeroModel: string` | L2 气动模型：`'basic'`（默认，各向同性二次阻力）/ `'enhanced'`（机体气动矩阵 + 入流） |
+| `actuatorModel: string` | L4 执行器模型：`'linear'`（默认）/ `'nonlinear'`（电压跌落 + 油门曲线） |
+| `turbulence` / `turbulenceIntensity` / `seed` | L3 湍流开关 / σ 缩放 / 复现种子 |
+| `estimator: string` | L5 估计器：`'none'`（默认）/ `'ekf'` |
+| `sensorNoise: boolean` | L6 传感器噪声（默认 `false`） |
+| `setTurbulence(on, intensity?, seed?)` | 组装 / 清空湍流模型 |
+| `setEstimator(mode)` | 用当前位姿初始化 EKF / 清空 |
+| `setSensorNoise(on, seed?)` | 组装 / 清空传感器噪声模型 |
+| `applyHighFidelityPreset(seed = 1)` | 一键开启全部保真层（湍流留默认关）；EKF 配置显式取自 `px4EkfConfig(PX4_STOCK)` |
+| `setHighFidelityEnabled(on)` | UI 可逆开关：开→套用预设；关→恢复运动学基线（与默认构造逐位一致） |
+| `groundEffect()` | 当前地面效应升力增益（贴地 +25%、0.5m 外归 1.0，高空零影响） |
+| `dynParams: DynamicsParams` | 刚体参数（含 M4 新增 `cdaForward`/`cdaSide`/`cdaUp`/`rotorRadius`） |
+| `ekfPos* / ekfVel*` | EKF 估计位置 / 速度（**诊断级**：暴露给 HUD 读数，不接入控制环） |
+
+**`sim/sim_high_fidelity.ts` — M4/M5 端到端离线验证**
+
+- 40 项断言；与 App 侧 `scripts/sim_stage_*.js` 覆盖同一批物理性质。
+- 关键：前向「低头」断言取**过程峰值**（加速段倾角最大），稳态巡航只需抵消阻力、倾角会回落（实测 ≈ −0.5°）。
+- 已并入 `npm run verify`（`sim:hf`）。
+
+### Changed（变更）
+
+| 项 | 说明 |
+| --- | --- |
+| `src/dynamics/FlightDynamics.ts` | `step()` 新增 `groundEffect` / `enhancedAero` 可选参数（默认 1 / false ⇒ 零回归）；新增 `groundEffectFactor()`；`DynamicsParams` 扩 `cdaForward` / `cdaSide` / `cdaUp` / `rotorRadius`；新增 `diskArea()` |
+| `src/dynamics/CascadeController.ts` | 新增 `attitudeRateCmd()`（中环）/ `rateTorque()`（内环）/ `bodyDragForce()`（机体气动矩阵 + 入流） |
+| `src/dynamics/RotorMixer.ts` | 新增 `actuatorNonlinearSpeeds()` / `effectiveMaxRotor()` / `invertActuatorNonlinear()`（逆模型补偿电压跌落，前向模型会饿死闭环悬停点） |
+| `tests/run-self-tests.ts`、`tests/self-tests.test.ts` | 新增 SeedPRNG / Turbulence / EkfEstimator / SensorModel / Px4Params 五路自检（与 App 端 `ARDroneSession` 自检链同序） |
+| 版本号 | `package.json` 与 `package-lock.json` 同步升至 `0.4.0`（两处） |
+| 抽取边界 | `docs/extraction-map.md`「已纳入」新增上述五个模块行 |
+
+### Verified（验证）
+
+| 项 | 结果 |
+| --- | --- |
+| `tsc --noEmit` | ✅ 通过 |
+| `vitest run` | ✅ **90 passed** |
+| 零依赖自检（`npm run selfcheck`） | ✅ **18 个模块全部 PASS**；`DroneController.selfTest` **39 项断言全通过** |
+| `sim/sim_flight.ts` | ✅ 退出码 0（盲飞 `−21.67m` / 感知驱动硬停 `0.25m` **数值未变**） |
+| `sim/scenarios.ts` | ✅ **6/6 通过**，退出码 0 |
+| `sim/sim_high_fidelity.ts`（新） | ✅ **40/40 断言全通过**，退出码 0 |
+| `check:dco` | ✅ 通过 |
+
+**零回归保证**：默认全部保真层关闭时，`update()` 运动学路径逐位不变；
+`FlightDynamics.step` 的两个新参数均有默认值，`CascadeController` / `RotorMixer` 为**纯新增导出**（不改动既有函数），
+因此既有调用方与黄金值全部守住。
+
+### 已知遗留
+
+1. `EKF` 当前**仅诊断级**：估计结果不反馈进控制环（标定后再决定接线），故开启不改变手感。
+2. `TurbulenceModel` 只作用于动力学内核（`useDynamics=true`）；运动学内核的风扰仍走 `windAccel` 前馈口径。
+3. `applyHighFidelityPreset` 的 EKF 配置取自 `px4EkfConfig(PX4_STOCK)`，属**静态参数标定**，非逐位对照 PX4 源码实现。
+
+---
+
 ## [0.3.0] — 2026-10-10
 
 M3 收口：**DroneController 双内核**（运动学 ↔ 真实刚体动力学）集成 —— 把 App 侧 P1 真实飞控动力学与 P2 执行器动力学（电机一阶滞后 + 每桨差动）以「默认关闭、零回归」的方式并入库内控制器。

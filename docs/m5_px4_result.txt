@@ -1,0 +1,25 @@
+M5-1 PX4 参数映射验证 ALL PASS
+--- 推导 vs 硬编码 ---
+attRateKp=7.5  DYN_ATT_RATE_KP=7.5
+rateKp=30  DYN_RATE_KP=30
+yawRateKp=8  DYN_YAW_RATE_KP=8
+maxRate=6  DYN_MAX_RATE=6
+EKF accelNoise=0.35 (PX4 EKF2_ACC_NOISE=0.35)
+EKF gyroNoise=0.015 (PX4 EKF2_GYR_NOISE=0.015)
+--- 断言 ---
+  ✓ PX4 默认参数已登记 MC_ROLL_P=4.0
+  ✓ PX4 默认参数已登记 MC_YAW_P=2.8
+  ✓ PX4 默认参数已登记 EKF2_ACC_NOISE=0.35
+  ✓ PX4 默认参数已登记 EKF2_GYR_NOISE=0.015
+  ✓ 推导 attRateKp==DYN_ATT_RATE_KP(7.5)
+  ✓ 推导 rateKp==DYN_RATE_KP(30)
+  ✓ 推导 yawRateKp==DYN_YAW_RATE_KP(8)
+  ✓ 推导 maxRate==DYN_MAX_RATE(6)
+  ✓ 等刚度 attRateKp*rateKp==225
+  ✓ EKF accelNoise 等量标定 PX4(EKF2_ACC_NOISE)
+  ✓ EKF gyroNoise 等量标定 PX4(EKF2_GYR_NOISE)
+  ✓ 预设接线 px4EkfConfig(PX4_STOCK)
+  ✓ 预设开启全部保真层(useDynamics/rateLoop/enhanced/nonlinear/ekf)
+  ✓ 默认 estimator='none'
+  ✓ 默认 sensorNoise=false
+  ✓ 默认 useDynamics=false

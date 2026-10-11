@@ -1,0 +1,44 @@
+M4 阶段A 速率环内环离线模拟结果
+========================================================
+生成时间：2026-10-11T14:11:17.962Z
+源码常数：ATT_RATE_KP=7.5 RATE_KP=30 MAX_RATE=6 YAW_RATE_KP=8
+          DYN_ATT_KP=225 DYN_ATT_KD=30（单PD，对照）
+          mass=0.12 g=9.81 I_t=0.0014 I_y=0.0026
+
+
+常数（解析自源码）
+  DYN_ATT_KP=225 DYN_ATT_KD=30 DYN_YAW_KP=8 substeps=4
+  ATT_RATE_KP=7.5 RATE_KP=30 RATE_KD=0 YAW_RATE_KP=8 MAX_RATE=6
+  mass=0.12 g=9.81 I_t=0.0014 I_y=0.0026 c=0.004 maxTilt=20°
+
+① 纯函数：中环限幅 / 内环符号 / 级联≡单PD
+  [PASS] 中环：正角度误差→正速率指令
+  [PASS] 中环：巨误差被 maxRate 限幅
+  [PASS] 中环：零误差→零速率指令
+  [PASS] 内环：正速率误差→正力矩
+  [PASS] 内环：当前角速度削弱所需力矩
+  [PASS] 级联≡单PD：稳态角度一致
+  [PASS] 级联≡单PD：稳态角速度一致
+  [PASS] 级联：阶跃无发散（角度有界）
+
+② 集成·关速率环（回归基线）
+  [PASS] 悬停：漂移<5cm
+  [PASS] 悬停：高度保持<3cm
+  [PASS] 悬停：姿态水平(|pitch|,|roll|<2°)
+  [PASS] 前向：满前向低头(pitch<-3°)
+  [PASS] 前向：松手停稳(<0.1m/s)
+  [PASS] 偏航：产生偏航角速率(|yawRate|>1)
+
+③ 集成·开速率环（零回归 + 结构正确）
+  [PASS] 悬停：漂移<5cm
+  [PASS] 悬停：高度保持<3cm
+  [PASS] 悬停：姿态水平(|pitch|,|roll|<2°)
+  [PASS] 前向：满前向低头(pitch<-3°)
+  [PASS] 前向：松手停稳(<0.1m/s)
+  [PASS] 偏航：产生偏航角速率(|yawRate|>1)
+
+④ 等价性：开 vs 关（同一物理，仅结构不同）
+  [PASS] 前向：开/关稳态位移差 < 5cm（等价）
+  [PASS] 前向：开/关峰值低头量级一致(差<2°)
+
+断言汇总：22/22 通过 —— ALL PASS

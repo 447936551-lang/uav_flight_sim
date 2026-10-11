@@ -1,0 +1,12 @@
+M5-2 ULog 回放夹具 ALL PASS
+ULog 文件: fixtures/sim_log.ulg (64978 bytes, 600 records)
+最大重跑-日志 位置误差 = 8.650e-8 m
+最大重跑-真值 位置误差 = 0.0101 m
+--- 断言 ---
+  ✓ ULog 头部 magic 合法
+  ✓ AR_SIM FMT 已注册
+  ✓ AR_SIM 字段数 = 9
+  ✓ 数据记录数 == N(600)
+  ✓ 两次写字节一致（确定性）
+  ✓ 重跑 EKF == 日志 EKF（<1e-3m，格式往返+可复现）
+  ✓ 重跑 EKF 跟踪真值（<0.25m）

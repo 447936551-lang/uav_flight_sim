@@ -8,7 +8,7 @@
 
 | 源 App 模块（.ets） | 库模块（.ts） | 说明 |
 | --- | --- | --- |
-| `ar/DroneController.ets`（运动学 + 真实动力学双内核） | `src/model/DroneController.ts` | 运动学内核（默认）+ 真实刚体动力学双内核；`setFlightMode`/`useDynamics` 切换，默认运动学（零回归）；`stepDynamics` 串起级联控制 / 混控 / 执行器一阶滞后 / 刚体积分（v0.3.0 并入） |
+| `ar/DroneController.ets`（运动学 + 真实动力学双内核 + M4/M5 保真层） | `src/model/DroneController.ts` | 运动学内核（默认）+ 真实刚体动力学双内核；`setFlightMode`/`useDynamics` 切换，默认运动学（零回归）；`stepDynamics` 串起级联控制 / 混控 / 执行器一阶滞后 / 刚体积分（v0.3.0 并入）；v0.4.0 新增 L1 速率环 / L2 增强气动 / L3 湍流 / L4 执行器非线性 / L5 EKF（诊断级）/ L6 传感器噪声，全部默认关，并提供 `applyHighFidelityPreset` / `setHighFidelityEnabled` 一键装配与可逆开关 |
 | `ar/WorldObject.ets` | `src/model/WorldObject.ts` | 世界对象基类（锚定 + 偏移位姿） |
 | `ar/CollisionDetector.ets` | `src/avoidance/CollisionDetector.ts` | 碰撞 / 威胁评估（纯函数） |
 | `ar/SteeringBehavior.ets`（含 bypassMode） | `src/avoidance/SteeringBehavior.ts` | 转向避障；商标化能力去商标化为 `bypassMode`；硬停面随速度伸缩（`avoidMarginFor`）、绕行方向按障碍方位择优（`pickAvoidSide`，2026-10-06 同步） |
@@ -16,7 +16,12 @@
 | `ar/HudModel.ets` | `src/telemetry/HudModel.ts` | HUD 威胁等级 / 配色 / 盲态（Blind）· 代测（degraded）· 抑制态（suppressed）三条「不是安全」语义 |
 | `ar/FlightDynamics.ets` | `src/dynamics/FlightDynamics.ts` | 刚体动力学积分器（半隐式欧拉） |
 | `ar/RotorMixer.ets` | `src/dynamics/RotorMixer.ts` | 四旋翼混控 + 执行器饱和 + 电机一阶滞后 |
-| `ar/CascadeController.ets` | `src/dynamics/CascadeController.ts` | 级联控制纯函数 |
+| `ar/CascadeController.ets`（含 L1/L2 扩展） | `src/dynamics/CascadeController.ts` | 级联控制纯函数；v0.4.0 新增 `attitudeRateCmd`（中环）/ `rateTorque`（内环）/ `bodyDragForce`（机体气动矩阵 + 入流） |
+| `ar/Px4Params.ets`（M5-1） | `src/dynamics/Px4Params.ts` | PX4 公开默认参数 → 本仓高保真层增益 / EKF 噪声的**唯一真值源**（静态标定，非逐位抄实现） |
+| `ar/EkfEstimator.ets`（L5） | `src/dynamics/EkfEstimator.ts` | 误差状态 EKF（15 状态：p/v/att/gyro bias/accel bias） |
+| `ar/SensorModel.ets`（L6） | `src/dynamics/SensorModel.ts` | 传感器噪声 / 丢包模型（种子化，可复现） |
+| `ar/Turbulence.ets`（L3） | `src/environment/Turbulence.ts` | 种子化 OU 湍流风（σ≈1.2 m/s、τ=0.5 s） |
+| `core/SeedPRNG.ets` | `src/core/SeedPRNG.ts` | Mulberry32 + Box-Muller 种子化 PRNG（L3/L6 公共随机源） |
 | `ar/PathPlanner.ets` | `src/planning/PathPlanner.ts` | 占用栅格 + A* + 可见性平滑 |
 | `ar/MeshGrid.ets` | `src/planning/MeshGrid.ts` | 场景 mesh → 占用栅格 |
 | `ar/EnvironmentModel.ets`（纯换算部分） | `src/environment/Atmosphere.ts` | 风矢量 / 空气密度 / 阵风 |

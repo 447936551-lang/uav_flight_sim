@@ -1,0 +1,45 @@
+=== M4/M5 高保真层离线验证 ===
+
+总断言 40 项 —— ALL PASS
+
+--- 断言明细 ---
+  [PASS] 阶段A/速率环关：悬停漂移<5cm
+  [PASS] 阶段A/速率环开：悬停漂移<5cm
+  [PASS] 阶段A/速率环开：高度保持偏差<3cm
+  [PASS] 阶段A/速率环开：姿态基本水平(|pitch|,|roll|<2°)
+  [PASS] 阶段A/零回归：速率环开与关漂移差<1cm
+  [PASS] 阶段A/速率环开：满前向低头(峰值 pitch<-3°)
+  [PASS] 阶段A/速率环开：满前向位移明显(offsetZ<-0.3)
+  [PASS] 阶段A/速率环开：松手后停稳(速度<0.1m/s)
+  [PASS] 阶段A/速率环开：偏航输入产生偏航角速率
+  [PASS] 阶段B/增强气动：悬停漂移<5cm
+  [PASS] 阶段B/增强气动：高度保持偏差<3cm
+  [PASS] 阶段B/增强气动：姿态基本水平(|pitch|,|roll|<2°)
+  [PASS] 阶段B/执行器非线性：悬停漂移<5cm
+  [PASS] 阶段B/执行器非线性：高度保持偏差<3cm
+  [PASS] 阶段B/执行器非线性：姿态基本水平(|pitch|,|roll|<2°)
+  [PASS] 阶段B/执行器非线性：满爬升稳态竖直速度 ≤ 线性对照（电压跌落削减可用推力）
+  [PASS] 阶段C/SeedPRNG：同种子同序列
+  [PASS] 阶段C/SeedPRNG：异种子异序列
+  [PASS] 阶段C/SeedPRNG：输出落在 [0,1)
+  [PASS] 阶段C/湍流：同种子同序列（可复现）
+  [PASS] 阶段C/湍流：有界(|w| < 6σ)
+  [PASS] 阶段C/湍流：强度缩放按比例放大扰动
+  [PASS] 阶段D/EKF：估计量全为有限值
+  [PASS] 阶段D/EKF：无噪声时位置跟踪真值(水平偏差<20cm)
+  [PASS] 阶段D/传感器噪声：开启后 EKF 输出仍有限
+  [PASS] 阶段D：湍流+噪声 同种子端到端可复现
+  [PASS] M5-1：推导 attRateKp == DYN_ATT_RATE_KP(7.5)
+  [PASS] M5-1：推导 rateKp == DYN_RATE_KP(30)
+  [PASS] M5-1：推导 yawRateKp == DYN_YAW_RATE_KP(8)
+  [PASS] M5-1：推导 maxRate == DYN_MAX_RATE(6)
+  [PASS] M5-1：等刚度 attRateKp*rateKp == 225
+  [PASS] M5-1：EKF accelNoise 等量标定 EKF2_ACC_NOISE
+  [PASS] M5-1：EKF gyroNoise 等量标定 EKF2_GYR_NOISE
+  [PASS] 零回归：高保真开→关往返后轨迹与默认逐位一致
+  [PASS] 零回归：默认 estimator 仍为 none
+  [PASS] 零回归：默认 useRateLoop 仍为 false
+  [PASS] 零回归：默认 aeroModel 仍为 basic
+  [PASS] 零回归：默认 actuatorModel 仍为 linear
+  [PASS] 零回归：默认 turbulence 仍为 false
+  [PASS] 零回归：默认 sensorNoise 仍为 false
