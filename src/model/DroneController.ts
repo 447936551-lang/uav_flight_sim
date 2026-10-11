@@ -34,9 +34,11 @@ import { SpatialPerception } from '../contract/SpatialPerception';
 import { EnvironmentPerception } from '../contract/EnvironmentPerception';
 import { WIND_GAIN } from '../environment/Atmosphere';
 import {
+  attitudeRateCmd,
   attitudeTorque,
   dragForce,
   positionHoldVelocity,
+  rateTorque,
   thrustVector,
   tiltFromUpDir,
   velocityLoop,
@@ -45,16 +47,32 @@ import {
 } from '../dynamics/CascadeController';
 import {
   DEFAULT_DYNAMICS,
+  DynamicsParams,
   FlightDynamics,
   geometryOf,
+  groundEffectFactor,
 } from '../dynamics/FlightDynamics';
 import {
   applyActuatorLimit,
   DEFAULT_QUAD,
+  invertActuatorNonlinear,
   mixThrusts,
   QuadGeometry,
   RotorPlant,
 } from '../dynamics/RotorMixer';
+import { TurbulenceModel } from '../environment/Turbulence';
+import {
+  EkfEstimator,
+  ImuSample,
+  quatFromEuler,
+  quatToRot,
+} from '../dynamics/EkfEstimator';
+import {
+  PosObservation,
+  SensorModel,
+  VelObservation,
+} from '../dynamics/SensorModel';
+import { PX4_STOCK, px4EkfConfig } from '../dynamics/Px4Params';
 
 // —— 闭环定点保持（M3 Step1）：复用 CascadeController.positionHoldVelocity ——
 // 与动力学模式的位置环同源：松杆 + 启用环境感知时，把飞机拉回锚点，
@@ -78,6 +96,16 @@ const DYN_SUBSTEP_HZ: number = 240;    // 动力学子步频率（半隐式欧�
 const DYN_MOTOR_TAU: number = 0.05;    // 电机一阶滞后时间常数（秒），与 RotorPlant 默认一致
 const LAND_TAPER_BAND: number = 0.4;   // 软降落锥形减速带（m）：低于此高度按比例限下降速度
 const LAND_TOUCHDOWN_SPEED: number = 0.12; // 触地速度（m/s）：锥形收敛到的目标下降速度
+
+// —— M4 速率环内环（阶段A）：姿态→角速度→力矩 级联增益（与单 PD 等刚度，零回归）——
+const DYN_ATT_RATE_KP: number = 7.5;   // 姿态角 → 期望角速度（1/s）
+const DYN_RATE_KP: number = 30.0;      // 角速度 → 期望力矩（与 DYN_RATE_KD 构成内环 PD）
+const DYN_RATE_KD: number = 0.0;       // 角速度阻尼（本机动力学惯量小，0 即可稳定）
+const DYN_YAW_RATE_KP: number = 8.0;   // 偏航速率环增益（常量备齐；社区内核偏航走运动学通道）
+const DYN_YAW_RATE_KD: number = 0.0;
+const DYN_MAX_RATE: number = 6.0;      // 姿态角速度限幅（rad/s）
+const DEG2RAD: number = Math.PI / 180;
+const RAD2DEG: number = 180 / Math.PI;
 
 /**
  * 无人机权威状态（Phase 5 显式物理状态机）。
@@ -311,6 +339,53 @@ export class DroneController {
   /** 四桨实际归一化转速 [FL,FR,BL,BR]，供 HUD / 渲染读取（0..maxRotor） */
   public rotorSpeeds: number[] = [0, 0, 0, 0];
 
+  // ── M4/M5 保真层（默认全关，零回归；经 applyHighFidelityPreset / setHighFidelityEnabled 装配）──
+  /** M4 速率环内环开关：开启后用「姿态→角速度→力矩」级联替代单 PD；默认关（零回归）。 */
+  public useRateLoop: boolean = false;
+  /** 气动模型：'basic'=各向同性二次阻力（默认）；'enhanced'=机体气动矩阵+入流（阶段B）。 */
+  public aeroModel: string = 'basic';
+  /** 执行器模型：'linear'=瞬时线性（默认）；'nonlinear'=电压跌落+油门曲线（阶段B·L4）。 */
+  public actuatorModel: string = 'linear';
+  /** M4 阶段C：L3 种子化湍流风（默认关，零回归）。 */
+  public turbulence: boolean = false;
+  public turbulenceIntensity: number = 1.0;
+  public seed: number = 0;
+  private turbModel: TurbulenceModel | null = null;
+  /** M4 阶段D：L5 自主 EKF + L6 传感器噪声（默认关，零回归）。 */
+  public estimator: string = 'none';
+  public sensorNoise: boolean = false;
+  private ekf: EkfEstimator | null = null;
+  private sensor: SensorModel | null = null;
+  private prevEkvX: number = 0;
+  private prevEkvY: number = 0;
+  private prevEkvZ: number = 0;
+  public ekfPosX: number = 0;
+  public ekfPosY: number = 0;
+  public ekfPosZ: number = 0;
+  public ekfVelX: number = 0;
+  public ekfVelY: number = 0;
+  public ekfVelZ: number = 0;
+  /** 电池电量百分比（0~100）：M4 执行器非线性据其衰减可用推力；默认 100（=不影响，零回归）。 */
+  public batteryPercent: number = 100;
+  /** 刚体动力学参数（含 M4 新增 cdaForward/cdaSide/cdaUp/rotorRadius 四字段）；默认与 DEFAULT_DYNAMICS 一致。 */
+  public dynParams: DynamicsParams = {
+    mass: DEFAULT_DYNAMICS.mass,
+    gravity: DEFAULT_DYNAMICS.gravity,
+    armLength: DEFAULT_DYNAMICS.armLength,
+    kT: DEFAULT_DYNAMICS.kT,
+    kQ: DEFAULT_DYNAMICS.kQ,
+    maxRotor: DEFAULT_DYNAMICS.maxRotor,
+    inertiaTilt: DEFAULT_DYNAMICS.inertiaTilt,
+    inertiaYaw: DEFAULT_DYNAMICS.inertiaYaw,
+    angularDamping: DEFAULT_DYNAMICS.angularDamping,
+    dragCoef: DEFAULT_DYNAMICS.dragCoef,
+    maxTiltRad: DEFAULT_DYNAMICS.maxTiltRad,
+    cdaForward: DEFAULT_DYNAMICS.cdaForward,
+    cdaSide: DEFAULT_DYNAMICS.cdaSide,
+    cdaUp: DEFAULT_DYNAMICS.cdaUp,
+    rotorRadius: DEFAULT_DYNAMICS.rotorRadius,
+  };
+
   /**
    * 空间感知输入（"空间感知输入" 契约）。
    * 若设置，update() 每帧通过它获取前向障碍距离；否则回退到 obstacleDistance 字段
@@ -493,6 +568,141 @@ export class DroneController {
   }
 
   /**
+   * 当前地面效应升力增益（离地越近增益越大）。
+   * ---------------------------------------------------------------
+   * 离地高度 = offsetY − minHeight（offsetY 相对放置面，minHeight 即贴地值）。
+   * 贴地 +25%、0.5m 外归 1.0 —— 高空飞行手感完全不变（零回归）。
+   */
+  public groundEffect(): number {
+    const agl: number = this.offsetY - this.params.minHeight;
+    return groundEffectFactor(agl);
+  }
+
+  /**
+   * L3 湍流风开关（阶段C，默认关）。
+   * ---------------------------------------------------------------
+   * 开启时（重新）创建种子化湍流模型；关闭时清空实例，风场回到纯 mean wind。
+   * 子步积分时若开启，turbModel.update(h) 取水平风扰动叠加进 windVelX/windVelZ，
+   * 再交给 FlightDynamics —— 湍流因此经由相对气流自然扰动机身，控制器须自行抑制。
+   * 相同 seed → 完全相同湍流序列（可复现/回归/回放）。
+   * @param on        是否启用湍流
+   * @param intensity σ 缩放（默认沿用 this.turbulenceIntensity）
+   * @param seed      随机种子（默认沿用 this.seed）
+   */
+  public setTurbulence(on: boolean, intensity?: number, seed?: number): void {
+    this.turbulence = on;
+    if (intensity !== undefined) {
+      this.turbulenceIntensity = intensity;
+    }
+    if (seed !== undefined) {
+      this.seed = seed;
+    }
+    if (on) {
+      this.turbModel = new TurbulenceModel(this.seed, this.turbulenceIntensity);
+    } else {
+      this.turbModel = null;
+    }
+  }
+
+  /**
+   * L5 状态估计器开关（阶段D，默认 'none'）。开启 'ekf' 用当前位姿初始化 EKF；'none' 清空。
+   * 注意：当前 EKF 为**诊断级**估计（暴露于 HUD 读数），尚未接入控制反馈环（交 M5 标定），
+   * 故开启不会改变飞行手感 → 零回归。
+   * @param mode 'none' | 'ekf'
+   */
+  public setEstimator(mode: string): void {
+    this.estimator = mode;
+    if (mode === 'ekf') {
+      this.ekf = new EkfEstimator(
+        [this.offsetX, this.offsetY, this.offsetZ],
+        [this.velX, this.velY, this.velZ],
+        quatFromEuler(this.yaw * DEG2RAD, this.pitch * DEG2RAD, this.roll * DEG2RAD)
+      );
+      this.prevEkvX = this.velX;
+      this.prevEkvY = this.velY;
+      this.prevEkvZ = this.velZ;
+    } else {
+      this.ekf = null;
+    }
+  }
+
+  /**
+   * L6 传感器噪声开关（阶段D，默认关）。开启后用种子化 SensorModel 给 EKF 喂加噪/丢包的观测。
+   * @param on 是否启用
+   * @param seed 随机种子（默认沿用 this.seed）
+   */
+  public setSensorNoise(on: boolean, seed?: number): void {
+    this.sensorNoise = on;
+    if (on) {
+      this.sensor = new SensorModel(seed === undefined ? this.seed : seed);
+    } else {
+      this.sensor = null;
+    }
+  }
+
+  /**
+   * M5·阶段D：一键高保真预设（PX4 量级标定）。研发/标定用，默认不调用、不影响手感。
+   * 开启全部保真层（动力学/速率环/增强气动/传感器噪声/EKF），湍流留默认关（按需开）。
+   * EKF 配置显式取自 px4EkfConfig(PX4_STOCK)，使「PX4 标定」在代码层可见。
+   */
+  public applyHighFidelityPreset(seed: number = 1): void {
+    this.useDynamics = true;
+    this.useRateLoop = true;
+    this.aeroModel = 'enhanced';
+    this.actuatorModel = 'nonlinear';
+    this.seed = seed;
+    this.turbulenceIntensity = 1.0;
+    this.turbulence = false;
+    this.turbModel = null;
+    this.sensorNoise = true;
+    this.sensor = new SensorModel(seed);
+    this.estimator = 'ekf';
+    this.ekf = new EkfEstimator(
+      [this.offsetX, this.offsetY, this.offsetZ],
+      [this.velX, this.velY, this.velZ],
+      quatFromEuler(this.yaw * DEG2RAD, this.pitch * DEG2RAD, this.roll * DEG2RAD),
+      px4EkfConfig(PX4_STOCK)
+    );
+    this.prevEkvX = this.velX;
+    this.prevEkvY = this.velY;
+    this.prevEkvZ = this.velZ;
+  }
+
+  /**
+   * UI 可逆开关：一键启用 / 恢复 M4/M5 全保真栈。
+   * ---------------------------------------------------------------
+   * on=true  → 套用 applyHighFidelityPreset（动力学 + 速率环 + 气动增强 +
+   *            执行器非线性 + 传感器噪声 + EKF；湍流保持默认关）。
+   * on=false → 恢复基线运动学内核（与默认构造一致，零回归）。
+   * 默认关，故出厂 / 首飞走旧手感路径，绝不影响现有飞行体验。
+   */
+  public setHighFidelityEnabled(on: boolean): void {
+    if (on) {
+      this.applyHighFidelityPreset(this.seed > 0 ? this.seed : 1);
+      return;
+    }
+    this.useDynamics = false;
+    this.useRateLoop = false;
+    this.aeroModel = 'basic';
+    this.actuatorModel = 'linear';
+    this.turbulence = false;
+    this.turbulenceIntensity = 1.0;
+    this.sensorNoise = false;
+    this.sensor = null;
+    this.estimator = 'none';
+    this.ekf = null;
+    this.ekfPosX = 0;
+    this.ekfPosY = 0;
+    this.ekfPosZ = 0;
+    this.ekfVelX = 0;
+    this.ekfVelY = 0;
+    this.ekfVelZ = 0;
+    this.prevEkvX = this.velX;
+    this.prevEkvY = this.velY;
+    this.prevEkvZ = this.velZ;
+  }
+
+  /**
    * 动力学内核单帧推进（M3 Step2）：把摇杆意图经「速度环 → 推力矢量 → 期望倾角 →
    * 姿态环 PD → 混控 → 执行器滞后 → 刚体积分」整条真实飞控链路算出来，再回写公开字段。
    * 与运动学内核互斥（update() 已提前 return）。yaw 仍由运动学通道积分以保持机体轴一致。
@@ -505,8 +715,8 @@ export class DroneController {
     p: DroneFlightParams, hasMoveInput: boolean): void {
     const d: FlightDynamics = this.dyn();
     const plant: RotorPlant = this.plant();
-    const geo: QuadGeometry = geometryOf(DEFAULT_DYNAMICS);
-    const D = DEFAULT_DYNAMICS;
+    const geo: QuadGeometry = geometryOf(this.dynParams);
+    const D = this.dynParams;
     const active: boolean = this.placed && this.flying;
 
     if (!active) {
@@ -581,15 +791,86 @@ export class DroneController {
       // 期望倾角（yaw 对齐机体轴）
       const tilt: number[] = tiltFromUpDir(tv[1], tv[3], fx, fz, rx, rz, D.maxTiltRad);
       // 姿态环 PD → 期望力矩（偏航力矩置 0：偏航由运动学通道积分）
-      const tauPitch: number = attitudeTorque(tilt[0], d.pitch, d.wPitch, DYN_ATT_KP, DYN_ATT_KD, D.inertiaTilt);
-      const tauRoll: number = attitudeTorque(tilt[1], d.roll, d.wRoll, DYN_ATT_KP, DYN_ATT_KD, D.inertiaTilt);
+      // M4 阶段A：开启速率环时改用「姿态→角速度→力矩」级联（与单 PD 等刚度，零回归）。
+      let tauPitch: number;
+      let tauRoll: number;
+      if (this.useRateLoop) {
+        const rateP: number = attitudeRateCmd(tilt[0], d.pitch, DYN_ATT_RATE_KP, DYN_MAX_RATE);
+        const rateR: number = attitudeRateCmd(tilt[1], d.roll, DYN_ATT_RATE_KP, DYN_MAX_RATE);
+        tauPitch = rateTorque(rateP, d.wPitch, DYN_RATE_KP, DYN_RATE_KD, D.inertiaTilt);
+        tauRoll = rateTorque(rateR, d.wRoll, DYN_RATE_KP, DYN_RATE_KD, D.inertiaTilt);
+      } else {
+        tauPitch = attitudeTorque(tilt[0], d.pitch, d.wPitch, DYN_ATT_KP, DYN_ATT_KD, D.inertiaTilt);
+        tauRoll = attitudeTorque(tilt[1], d.roll, d.wRoll, DYN_ATT_KP, DYN_ATT_KD, D.inertiaTilt);
+      }
       const tauYaw: number = 0;
-      // 混控 → 执行器限幅 → 电机一阶滞后 → 实际推力
+      // 混控 → 四桨推力 → 执行器饱和（限幅在转速上）
       const raw: number[] = mixThrusts(T, tauPitch, tauRoll, tauYaw, geo);
       const limited = applyActuatorLimit(raw, geo, airDensity);
-      const act = plant.update(h, limited.speeds, geo, airDensity);
-      // 刚体积分
-      d.step(h, act.thrusts, windX, windZ, airDensity);
+      const cmd: number[] = limited.speeds;   // 指令转速（已限幅），交给执行器动力学滞后
+      // L4 执行器非线性（阶段B）：电压跌落（集总耦合）+ 油门曲线（中段非线性）。
+      // 默认 linear → cmdEff = cmd，与电机滞后本体完全一致（零回归）。
+      let cmdEff: number[] = cmd;
+      if (this.actuatorModel === 'nonlinear') {
+        cmdEff = invertActuatorNonlinear(cmd, geo, T, this.batteryPercent / 100);
+      }
+      // L3 湍流（阶段C）：种子化 OU 扰动叠加到风场，再进动力学积分。
+      // 默认 turbulence=false → wX/wZ 恒等于 windVelX/windVelZ（零回归）。
+      let wX: number = windX;
+      let wZ: number = windZ;
+      if (this.turbulence && this.turbModel !== null) {
+        const tb = this.turbModel.update(h);
+        wX += tb.wx;
+        wZ += tb.wz;
+      }
+      const act = plant.update(h, cmdEff, geo, airDensity);
+      // 刚体积分（地面效应贴地增升；L2 增强气动走机体气动矩阵+入流）
+      d.step(h, act.thrusts, wX, wZ, airDensity, this.groundEffect(), this.aeroModel === 'enhanced');
+    }
+
+    // ── M4·阶段D：EKF 估计（诊断级，默认关；不接入控制环 → 零回归）──
+    // 帧级（60Hz）把真值 IMU（角速度+比力）与位置/速度观测喂给 EKF；sensorNoise 开启时
+    // 先经种子化 SensorModel 加噪/丢包。估计结果暴露给 HUD 诊断读数，不改变飞行手感。
+    if (this.estimator === 'ekf' && this.ekf !== null) {
+      const aWorld: number[] = [
+        (this.velX - this.prevEkvX) / dt,
+        (this.velY - this.prevEkvY) / dt,
+        (this.velZ - this.prevEkvZ) / dt,
+      ];
+      const q: number[] = quatFromEuler(this.yaw * DEG2RAD, this.pitch * DEG2RAD, this.roll * DEG2RAD);
+      const Rm: number[][] = quatToRot(q);
+      // 真值比力（机体）= Rᵀ(a_world - g_world)，g_world=[0,−9.81,0]
+      const awg: number[] = [aWorld[0], aWorld[1] + 9.81, aWorld[2]];
+      const aBody: number[] = [
+        Rm[0][0] * awg[0] + Rm[1][0] * awg[1] + Rm[2][0] * awg[2],
+        Rm[0][1] * awg[0] + Rm[1][1] * awg[1] + Rm[2][1] * awg[2],
+        Rm[0][2] * awg[0] + Rm[1][2] * awg[1] + Rm[2][2] * awg[2],
+      ];
+      const truthGyro: number[] = [d.wPitch, d.wYaw, d.wRoll];
+      let imu: ImuSample = { gyro: truthGyro, accel: aBody };
+      let posObs: PosObservation | null = null;
+      let velObs: VelObservation | null = null;
+      if (this.sensorNoise && this.sensor !== null) {
+        imu = this.sensor.imu(truthGyro, aBody);
+        const po = this.sensor.observePos([this.offsetX, this.offsetY, this.offsetZ]);
+        const vo = this.sensor.observeVel([this.velX, this.velY, this.velZ]);
+        if (po.available) { posObs = po; }
+        if (vo.available) { velObs = vo; }
+      } else {
+        posObs = { pos: [this.offsetX, this.offsetY, this.offsetZ], available: true };
+        velObs = { vel: [this.velX, this.velY, this.velZ], available: true };
+      }
+      this.ekf.step(dt, imu, {
+        pos: posObs ? posObs.pos : undefined,
+        posAvailable: posObs ? posObs.available : false,
+        vel: velObs ? velObs.vel : undefined,
+        velAvailable: velObs ? velObs.available : false,
+      });
+      const ep: number[] = this.ekf.position;
+      const ev: number[] = this.ekf.velocity;
+      this.ekfPosX = ep[0]; this.ekfPosY = ep[1]; this.ekfPosZ = ep[2];
+      this.ekfVelX = ev[0]; this.ekfVelY = ev[1]; this.ekfVelZ = ev[2];
+      this.prevEkvX = this.velX; this.prevEkvY = this.velY; this.prevEkvZ = this.velZ;
     }
 
     // 回写公开字段
@@ -653,6 +934,22 @@ export class DroneController {
     this.yawRate = 0;
     this.pitch = 0;
     this.roll = 0;
+    // M4/M5 保真层复位（全部回到默认关，零回归）
+    this.useRateLoop = false;
+    this.aeroModel = 'basic';
+    this.actuatorModel = 'linear';
+    this.turbulence = false;
+    this.turbulenceIntensity = 1.0;
+    this.seed = 0;
+    this.turbModel = null;
+    this.estimator = 'none';
+    this.sensorNoise = false;
+    this.ekf = null;
+    this.sensor = null;
+    this.ekfPosX = 0; this.ekfPosY = 0; this.ekfPosZ = 0;
+    this.ekfVelX = 0; this.ekfVelY = 0; this.ekfVelZ = 0;
+    this.prevEkvX = 0; this.prevEkvY = 0; this.prevEkvZ = 0;
+    this.batteryPercent = 100;
   }
 
   /**
@@ -1160,6 +1457,133 @@ export class DroneController {
         d.update(1 / 60);
       }
       check('动力学前进：满前向位移明显', d.offsetZ < -0.3);
+    }
+
+    // 13) M4/M5 高保真栈装配：一键预设正确组装所有保真层；可逆开关能恢复基线（零回归）
+    {
+      const d: DroneController = new DroneController();
+      d.applyHighFidelityPreset(1);
+      check('高保真预设：组装动力学+速率环+增强气动+非线性+传感器+EKF',
+        d.useDynamics === true && d.useRateLoop === true && d.aeroModel === 'enhanced' &&
+        d.actuatorModel === 'nonlinear' && d.sensorNoise === true && d.estimator === 'ekf');
+      check('高保真预设：EKF 实例已建', d.ekf !== null);
+      d.setHighFidelityEnabled(false);
+      check('高保真关闭：恢复运动学基线',
+        d.useDynamics === false && d.useRateLoop === false &&
+        d.aeroModel === 'basic' && d.actuatorModel === 'linear' && d.estimator === 'none');
+    }
+
+    // 14) M4 阶段A：速率环内环（级联控制）端到端 —— 默认关（零回归）；
+    //     开启后姿态链路变为「角度→角速度→力矩」，与单 PD 等刚度，hover/前向/偏航行为不变。
+    {
+      const d: DroneController = new DroneController();
+      d.setFlightMode(true);
+      d.useRateLoop = true;
+      d.placed = true;
+      d.flying = true;
+      d.obstacleDistance = Infinity;
+      d.environmentActive = true;
+      for (let i = 0; i < 360; i++) {
+        d.update(1 / 60);
+      }
+      check('M4速率环：悬停稳定（漂移<5cm）',
+        Math.sqrt(d.offsetX * d.offsetX + d.offsetZ * d.offsetZ) < 0.05);
+      check('M4速率环：悬停高度保持（偏差<3cm）', Math.abs(d.offsetY - 0.9) < 0.03);
+      check('M4速率环：姿态基本水平（|pitch|,|roll|<2°）',
+        Math.abs(d.pitch) < 2 && Math.abs(d.roll) < 2);
+      // 满前向 → 低头 + 松手回稳
+      const d2: DroneController = new DroneController();
+      d2.setFlightMode(true);
+      d2.useRateLoop = true;
+      d2.placed = true;
+      d2.flying = true;
+      d2.obstacleDistance = Infinity;
+      d2.environmentActive = true;
+      d2.moveY = 1;
+      let peakNose: number = 0;
+      for (let i = 0; i < 120; i++) {
+        d2.update(1 / 60);
+        if (d2.pitch < peakNose) {
+          peakNose = d2.pitch;
+        }
+      }
+      check('M4速率环：满前向出现低头（pitch<0）', peakNose < -3);
+      d2.moveY = 0;
+      for (let i = 0; i < 360; i++) {
+        d2.update(1 / 60);
+      }
+      check('M4速率环：松手后停稳（速度<0.1m/s）', d2.speed < 0.1);
+      // 偏航输入 → 偏航角速率产生（社区内核偏航走运动学通道，仍应产生 yawRate）
+      const d3: DroneController = new DroneController();
+      d3.setFlightMode(true);
+      d3.useRateLoop = true;
+      d3.placed = true;
+      d3.flying = true;
+      d3.obstacleDistance = Infinity;
+      d3.environmentActive = true;
+      d3.yawInput = 1;
+      for (let i = 0; i < 60; i++) {
+        d3.update(1 / 60);
+      }
+      check('M4速率环：偏航输入产生偏航角速率', Math.abs(d3.yawRate) > 1);
+    }
+
+    // 15) M4 阶段B：增强气动（L2）+ 执行器非线性（L4）端到端 —— 两层默认都关（零回归）；
+    //     开启后不得破坏悬停与回稳，并为后续高保真层铺路。
+    {
+      const d: DroneController = new DroneController();
+      d.setFlightMode(true);
+      d.aeroModel = 'enhanced';
+      d.placed = true;
+      d.flying = true;
+      d.obstacleDistance = Infinity;
+      d.environmentActive = true;
+      for (let i = 0; i < 360; i++) {
+        d.update(1 / 60);
+      }
+      check('M4增强气动：悬停稳定（漂移<5cm）',
+        Math.sqrt(d.offsetX * d.offsetX + d.offsetZ * d.offsetZ) < 0.05);
+      check('M4增强气动：悬停高度保持（偏差<3cm）', Math.abs(d.offsetY - 0.9) < 0.03);
+      check('M4增强气动：姿态基本水平（|pitch|,|roll|<2°）',
+        Math.abs(d.pitch) < 2 && Math.abs(d.roll) < 2);
+      const d2: DroneController = new DroneController();
+      d2.setFlightMode(true);
+      d2.aeroModel = 'enhanced';
+      d2.placed = true;
+      d2.flying = true;
+      d2.obstacleDistance = Infinity;
+      d2.environmentActive = true;
+      d2.moveY = 1;
+      let peakNoseB: number = 0;
+      for (let i = 0; i < 120; i++) {
+        d2.update(1 / 60);
+        if (d2.pitch < peakNoseB) {
+          peakNoseB = d2.pitch;
+        }
+      }
+      check('M4增强气动：满前向低头（pitch<-3°）', peakNoseB < -3);
+      d2.moveY = 0;
+      for (let i = 0; i < 360; i++) {
+        d2.update(1 / 60);
+      }
+      check('M4增强气动：松手后停稳（速度<0.1m/s）', d2.speed < 0.1);
+
+      // 执行器非线性：悬停稳定（控制器补偿电压跌落，不得发散）
+      const d3: DroneController = new DroneController();
+      d3.setFlightMode(true);
+      d3.actuatorModel = 'nonlinear';
+      d3.placed = true;
+      d3.flying = true;
+      d3.obstacleDistance = Infinity;
+      d3.environmentActive = true;
+      for (let i = 0; i < 360; i++) {
+        d3.update(1 / 60);
+      }
+      check('M4执行器非线性：悬停稳定（漂移<5cm）',
+        Math.sqrt(d3.offsetX * d3.offsetX + d3.offsetZ * d3.offsetZ) < 0.05);
+      check('M4执行器非线性：悬停高度保持（偏差<3cm）', Math.abs(d3.offsetY - 0.9) < 0.03);
+      check('M4执行器非线性：姿态基本水平（|pitch|,|roll|<2°）',
+        Math.abs(d3.pitch) < 2 && Math.abs(d3.roll) < 2);
     }
 
     if (fails.length !== 0) {
