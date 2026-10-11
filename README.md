@@ -35,8 +35,11 @@ src/
     DroneController.ts    飞控状态机（运动学 + 真实动力学双内核，setFlightMode 切换）+ 速度积分 + 姿态推导 + M4/M5 保真层开关
     WorldObject.ts        AR 世界对象基类（锚定 + 偏移位姿）
   avoidance/            碰撞评估 + 转向力合成
-    CollisionDetector.ts  碰撞 / 威胁评估（纯函数）
-    SteeringBehavior.ts   Seek/Avoid 转向 + 速度域避障
+    CollisionDetector.ts  碰撞 / 威胁评估（纯函数）+ 上方净距 + 感知失联兜底档位
+    SteeringBehavior.ts   Seek/Avoid 转向 + 速度域避障 + 绕行方向择优
+    FusionGeometry.ts     多源融合几何（射线-平面 / 射线-三角形 / 走廊判据）
+    TemporalGuard.ts      P1 时间维度：距离低通 + 急停迟滞 + 失联计时 + 走廊软权重
+    VelocityObstacle.ts   P3 预测式：TTC 判据 + 速度障碍半空间投影 + 扇区构造
   dynamics/             真实刚体动力学（v0.2.0 新增）
     RotorMixer.ts         四旋翼混控 + 执行器饱和 + 电机一阶滞后
     FlightDynamics.ts     刚体动力学积分器（半隐式欧拉）
@@ -60,7 +63,7 @@ src/
 tests/                 vitest 单测 + 零依赖自检 + 仿真黄金用例
 sim/
   sim_flight.ts         无头飞行仿真演示（含 MockPerception）
-  scenarios.ts          M3 场景仿真：六场景确定性冒烟（CI 门禁）
+  scenarios.ts          M3 场景仿真：十一场景确定性冒烟 + P5 避障量化指标（CI 门禁）
   sim_high_fidelity.ts  M4/M5 高保真层端到端验证（速率环/气动/湍流/EKF，CI 门禁）
 docs/
   design.md             设计说明与验收口径
@@ -91,8 +94,10 @@ npm run sim:hf     # M4/M5 高真度层端到端验证（40 项断言）
 npm run verify     # 一键：类型校验 + 单测 + 仿真 + 场景 + 高保真 + DCO
 ```
 
-> 场景仿真（`npm run sim:scenarios`）是 M3 新增的 CI 门禁：六场景确定性冒烟覆盖
+> 场景仿真（`npm run sim:scenarios`）是 M3 新增的 CI 门禁：**十一场景**确定性冒烟覆盖
 > model / avoidance / environment / planning / dynamics 五个域，任一失败即非零退出。
+> 其中 P5 五个场景输出统一量化指标（最小净距 / 侵入深度 / 到达路程 / 急停翻转 / 最小 TTC），
+> 让"避障做得更好"第一次有了可回归的度量而非手感描述。
 > 脚本化仿真方案与接入指南见 [`docs/simulation.md`](./docs/simulation.md) 与 [`docs/integration.md`](./docs/integration.md)。
 
 > 不装框架也能验收：`npm run selfcheck` 走零依赖自检（直接调用各模块内置 `selfTest()`）。
@@ -110,6 +115,23 @@ class MyDepthSampler implements SpatialPerception {
   getObstacleNormal?(): Vec3 | null {
     // 可选：障碍远离单位向量，用于横移参考
     return this.awayNormal;
+  }
+  // ↓ 以下均为**可选**扩展（v0.5.0），不实现则回退到单标量路径，零改动
+  getCeilingDistance?(): number {
+    // 上方净距（米）；Infinity = 上方无实体 / 测不到
+    return this.ceilingGap;
+  }
+  getObstacleLateral?(): number {
+    // 障碍横向偏置（米，机体右向为正），供绕行方向择优
+    return this.lateral;
+  }
+  isDepthSupported?(): boolean {
+    // 本机是否支持深度：明确不支持时失联兜底立即降档，不必等超时
+    return true;
+  }
+  getSectorScan?(): SectorScan | null {
+    // 多扇区扫描（P2）：预测式避障与绕行择优的输入源
+    return { sectors: this.sectors, timestampSec: t, confidence: 1 };
   }
 }
 
@@ -156,12 +178,44 @@ class MyWindSource implements EnvironmentPerception {
 | `AVOID_SAFE_DIST_M` | 1.6 m | 避障生效距离 = 硬停面 + 减速带 |
 | `DRONE_RADIUS_M` | 0.19 m | 机体包围球半径 |
 | `AVOID_STEER_GAIN` | 1.25 | 横向绕行增益（越近越鼓励横移贴墙滑行） |
+| `AVOID_MARGIN_BASE_M` | 0.25 m | 硬停面静态基线（速度相关硬停面 `avoidMarginFor(v) = 0.25 + v²/3`） |
+| `CEILING_MARGIN_M` / `CEILING_SLOW_BAND_M` | 0.35 / 0.55 m | 上方硬停面 / 上方减速带（竖直方向更保守） |
+| `DEPTH_TAU_SEC` | 0.12 s | 距离一阶低通时间常数（约 3τ≈0.36s 收敛 95%） |
+| `AVOID_HYSTERESIS_M` | 0.08 m | 急停迟滞宽度（进入用 margin，退出用 margin+此值） |
+| `VO_TTC_SEC` | 1.5 s | 预测式避障的期望最小碰撞时间 T |
+| `VO_CLEARANCE_M` | 0.19 m | 预测式避障必须保留的净距（= 机体半径） |
 
 避障强度与前进分量缩放**同源**：`fwdScale = (gap − margin) / band`，`avoidStrength = 1 − fwdScale`。因此面板读数与实际刹车力度永远一致，不会出现"显示危险却没刹车"。
 
 **规划式绕行**（`bypassMode`，默认 `false`）：用户直推障碍且完全无横移输入时，主动补一个侧向速度绕过去，而不是原地急停。与 `steerGain` 叠加而不冲突——前者只在"完全没有横移"时兜底，后者只放大已有横移。默认关闭即零回归。
 
 **盲态不是安全**：`obstacleDistance === Infinity` 有两种相反成因——前方确实无障，或这一帧防撞根本是盲的。`deriveHud()` 因此要求必传 `depthTrustworthy`，不可信时判 `Blind`（距离显示 `—`、配色刻意不用绿色）。否则"避障已失效"会被渲染成"∞ 安全"，用户无从察觉。
+
+### 避障演进能力（v0.5.0，全部默认关闭）
+
+反应式避障（`applyAvoidance`）回答的是"离障碍多远时该减到几成"，它有一个结构性盲区：**只看得见一个前向标量**。以下五项逐层补齐，且**每一项默认关闭** —— 关掉时与 v0.4.0 行为逐位一致（由单测与场景守门）。
+
+| 开关 | 补齐的维度 | 关键性质 |
+| --- | --- | --- |
+| `ceilingAvoidEnabled` | 垂直：上方净距 | 只压上升，**绝不强推下降**（下方可能才是安全区） |
+| `trustFallbackEnabled` | 失联时长分档 | normal 全量 / cautious 削弱 / hold 禁爬；本机不支持深度则立即 hold |
+| `bypassEnabled` | 绕行方位 | 障碍在右→向左绕，在左→向右绕（此前恒不启用择优） |
+| `temporalEnabled` | 时间：滤波 + 迟滞 | 盲帧**原样透传**（绝不插值成安全读数）；硬停面边界不再逐帧翻转 |
+| `voEnabled` | 预测：TTC + 速度障碍 | 半空间投影**只减不放**，故"启用只会更安全"；切向保留 → 贴墙滑行 |
+
+预测式层与反应式层是**叠加**关系而非替换：先跑已真机验证的反应式曲线，再把结果投影到速度障碍半空间交集上。这保证既有的飞行手感与 gap≈0.38m 刹停表现不被推翻。
+
+## P5 避障量化指标
+
+`npm run sim:scenarios` 的五个 P5 场景输出同一组指标，用于横向比较与回归：
+
+| 指标 | 口径 | 为什么这样定义 |
+| --- | --- | --- |
+| 最小净距 | 由**真实几何**（点到平面距离）算 | 不读控制器自报读数，避免"自我证明" |
+| 侵入深度 | `max(0, −最小净距)` | 是否真的撞上了 |
+| 到达路程 | 水平轨迹长度 | 绕行代价（越短越好） |
+| 急停翻转 | `avoidEmergency` 逐帧翻转次数 | 抖动的可量化代理（越小越好） |
+| 最小 TTC | 净距 ÷ 净距变化率（有限差分） | 动态障碍同样成立；越大越安全 |
 
 ## 里程碑
 
@@ -173,6 +227,7 @@ class MyWindSource implements EnvironmentPerception {
 | M3 仿真方案与文档 | 脚本化仿真方案（`docs/simulation.md`）、场景示例（`sim/scenarios.ts`）、接入指南（`docs/integration.md`，含对接 Simulator SIG） | ✅ 完成（v0.2.4） |
 | M4 高保真层 | `core/SeedPRNG` / `environment/Turbulence`(L3) / `dynamics/EkfEstimator`(L5) / `dynamics/SensorModel`(L6) + `DroneController` L1/L2/L4 接线，全部默认关 | ✅ 完成（v0.4.0） |
 | M5 标定与回放 | `dynamics/Px4Params`（PX4 参数映射，静态标定）+ ULog 回放夹具 + 指标标定 | ✅ 完成（v0.4.0） |
+| M5+ 避障演进 | P0 接线（垂直/失联/绕行）+ P1 时间维度 + P2 多扇区契约 + P3 预测式速度障碍 + P5 量化指标 | ✅ 完成（v0.5.0） |
 | M6 毕业准备 | 架构 SIG 毕业评审材料、QA SIG 准出材料 | ⏳ 待办 |
 
 > v0.2.0 属**超出原提案范围**的新增能力（原提案 M1–M4 未含刚体动力学与路径规划）。

@@ -6,6 +6,100 @@
 
 ---
 
+## [0.5.0] — 2026-10-11
+
+避障层演进：**P0 接线 → P1 时间维度 → P5 量化指标 → P2 多扇区契约 → P3 预测式速度障碍**。
+
+> 背景：既有避障是**位置域反应式**（`fwdScale = (d − margin) / band`），且控制器每帧只拿到
+> **一个前向标量距离**。这带来三个结构性缺口：
+>   ① 垂直方向根本没有避障（`evaluateCeiling` / `sensorTrust` 已实现但从未接线）；
+>   ② 没有任何时间记忆（读数抖动、硬停面边界翻转、失联无计时）；
+>   ③ 只看得见正前方 —— 斜向接近被低估、侧向障碍完全隐形。
+> 本次按 P0→P1→P5→P2→P3 逐层补齐，**每层独立开关、默认关闭**，
+> 于是**默认飞行手感与 0.4.0 逐位一致**（由黄金值与既有单测守门）。
+
+### Added（新增）
+
+**`src/avoidance/TemporalGuard.ts` — P1 时间维度守护**
+
+| 导出 | 说明 |
+| --- | --- |
+| `filterDistance(prev, raw, dt, tau)` | 距离一阶低通；**盲帧原样透传**（不插值成安全读数）、首次捕获直接采信、帧率无关（`1−e^(−dt/τ)`） |
+| `emergencyWithHysteresis(prev, d, margin, extra)` | 急停迟滞：进入用 `margin`，退出用 `margin + AVOID_HYSTERESIS_M` |
+| `corridorWeight(lateral, half)` | 走廊**软**权重（smoothstep 连续衰减），替代走廊半宽的"非此即彼"硬判 |
+| `BlindTracker` / `TemporalGuard` | 失联计时器 / 组合状态机（滤波 + 迟滞 + 计时） |
+| `DEPTH_TAU_SEC=0.12` / `AVOID_HYSTERESIS_M=0.08` / `CORRIDOR_SOFT_SPAN=1.0` | 阈值常量（单一事实来源） |
+| `selfTest()` | 38 项断言 |
+
+**`src/avoidance/VelocityObstacle.ts` — P3 预测式速度障碍**
+
+| 导出 | 说明 |
+| --- | --- |
+| `timeToCollision(d, closing, clearance)` / `minTtc(sectors, vx, vz)` | TTC 判据 |
+| `sectorLimit` / `buildVoConstraints` | 扇区 → 半空间约束 `v·û ≤ (d − clearance)/T/w`（`w` = 走廊软权重） |
+| `projectVelocity(vx, vz, constraints, iter)` | POCS 逐次投影到半空间交集（**只减超出量，永不放大速度**） |
+| `solveVelocityObstacle(...)` | 一键求解 + 指标回读（`minTtcSec` / `threatLateral` / `constraints`） |
+| `pickThreatSector(...)` | 按 **TTC**（而非距离）挑威胁最大扇区 |
+| `buildSectors(yawDeg, distances)` | 等分扇区 → 扇区样本（含机体右向为正的 `lateral`） |
+| `VO_TTC_SEC=1.5` / `VO_CLEARANCE_M=DRONE_RADIUS_M` / `VO_ITERATIONS=4` | 阈值常量 |
+| `selfTest()` | 34 项断言 |
+
+**`src/contract/SpatialPerception.ts` — P2 契约升维（可选方法，向后兼容）**
+
+| 新增 | 说明 |
+| --- | --- |
+| `getCeilingDistance?()` | 上方净距（P0 垂直避障） |
+| `getObstacleLateral?()` | 障碍横向偏置，机体右向为正（P0 绕行择优） |
+| `isDepthSupported?()` | 本机是否支持深度（不支持则失联兜底立即 hold） |
+| `getSectorScan?(): SectorScan \| null` | 多扇区扫描（P3 输入源）；返回 `null` 表示本帧无扇区数据 |
+| `SectorSample` / `SectorScan` | 纯数据类型（与 `VelocityObstacle.SectorInput` 结构化兼容） |
+
+**`src/model/DroneController.ts` — P0/P1/P2/P3 接线（五个开关，全部默认关）**
+
+| 开关 | 作用 |
+| --- | --- |
+| `ceilingAvoidEnabled` | `evaluateCeiling()` 参与爬升限速；**只压上升、绝不强推下降** |
+| `trustFallbackEnabled` | `sensorTrust(supported, blindSec)` + `sensorClimbScale()` 分档限爬 |
+| `bypassEnabled` | 把 `obstacleLateral` 喂给 `applyAvoidance`，使 `pickAvoidSide` 择优真正生效 |
+| `temporalEnabled` | 距离低通 + 急停迟滞（硬停面边界不再逐帧翻转） |
+| `voEnabled` | 反应式输出再投影到速度障碍交集（**叠加而非替换**） |
+
+新增诊断字段：`ceilingDistance` / `ceilingStrength` / `trustLevel` / `blindSec` / `obstacleLateral` / `filteredDistance` / `lastTtcSec` / `voBlocked` / `voConstraints`；`describe()` 仅在对应开关打开时追加行（关闭时输出逐位不变）。
+
+**`sim/scenarios.ts` — P5 量化指标与 5 个新场景（6 → 11）**
+
+统一指标：**最小净距 / 侵入深度 / 到达路程 / 急停翻转次数 / 最小 TTC / 末速**。
+净距由**真实几何**（点到平面距离）计算而非控制器自报读数；TTC 用净距的有限差分，故动态障碍同样成立。
+
+| 场景 | 验证的性质 | 实测 |
+| --- | --- | --- |
+| 斜向接近（45° 墙） | 单标量前向距离低估斜墙 | 反应式侵入 0.013m → 预测式 0 |
+| 门框穿越（侧向夹逼） | 侧向障碍对单标量完全隐形 | 反应式侵入 0.188m → 预测式 0（净距 0.160m） |
+| 动态障碍（墙推进后止步） | 预测层介入更早 | 最小 TTC 0.42s → 0.56s（+34%） |
+| 失联恢复 | 兜底降档与自动解除 | 7s→cautious、14s→hold、恢复→normal |
+| 垂直避障 | 上方限速且不强推下降 | 6s 爬升 4.10m → 0.25m |
+
+### Changed（变更）
+
+- `index.ts` barrel 新增 `TemporalGuard` / `VelocityObstacle` 两组导出，并补齐 `CollisionDetector` 的
+  `CeilingInfo` / `SensorTrust` / `evaluateCeiling` / `sensorTrust` / `sensorClimbScale` / `avoidMarginFor` 等既有但未导出的 API。
+- `DroneController.selfTest()` 断言 34 → **66** 项（新增 P0/P1/P2/P3 接线断言簇）。
+
+### Verified（验证）
+
+- `npm run typecheck` 通过；`npm test` **108 项**通过（新增 `tests/avoidance-evolution.test.ts` 16 项）；
+- `npm run selfcheck` 通过（`TemporalGuard` 38 项 / `VelocityObstacle` 34 项 / `DroneController` 66 项）；
+- `npm run sim:scenarios` **11/11** 通过，既有 6 个场景的黄金数值**逐位未变**（零回归）。
+
+### 已知边界（不做的事）
+
+- **主动后退不在本版范围**：一个无限逼近的障碍，任何只会"刹车"的避障层都必然被撞上 ——
+  这需要规划层（P4）给出后退 / 绕行指令，已在动态障碍场景的注释中明示。
+- `FusionGeometry.forwardGapFromWorldHit()` 的走廊**硬判**保持不变：其 `selfTest` 已钉死
+  "走廊外 → ∞" 语义。软权重以 `corridorWeight()` 独立提供，只被新链路消费。
+
+---
+
 ## [0.4.0] — 2026-10-11
 
 M4 高保真层（L1–L6）+ M5（PX4 参数映射 / ULog 回放 / 指标标定）—— 把 App 侧「保真度可选」的六层物理与三件标定夹具以**默认关闭、零回归**的方式并入本仓。

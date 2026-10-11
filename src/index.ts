@@ -24,7 +24,7 @@ export { Logger } from './core/Logger';
 export { LoggerLevel } from './core/LoggerLevel';
 
 // ── 契约：输入抽象接口（算法与数据源的唯一边界）──────────────────
-export { SpatialPerception } from './contract/SpatialPerception';
+export { SpatialPerception, SectorSample, SectorScan } from './contract/SpatialPerception';
 export { EnvironmentPerception } from './contract/EnvironmentPerception';
 
 // ── 避障层：碰撞评估 + 几何 ──────────────────────────────────────
@@ -32,12 +32,21 @@ export {
   PhysicsVec3,
   ThreatLevel,
   CollisionInfo,
+  CeilingInfo,
+  SensorTrust,
   AVOID_MARGIN_M,
   AVOID_SLOW_BAND_M,
   AVOID_SAFE_DIST_M,
+  AVOID_MARGIN_BASE_M,
+  AVOID_BRAKE_ACCEL,
+  AVOID_CORRIDOR_HALF_M,
+  AVOID_BELOW_PATH_M,
   DRONE_RADIUS_M,
   AVOID_MAX_FORCE,
   AVOID_STEER_GAIN,
+  CEILING_MARGIN_M,
+  CEILING_SLOW_BAND_M,
+  CEILING_SAFE_DIST_M,
   clamp01,
   clampRange,
   normalize,
@@ -45,7 +54,12 @@ export {
   closestPointOnAabb,
   sphereAabbHit,
   isValidDistance,
+  avoidMarginFor,
+  avoidSafeDistFor,
   evaluate,
+  evaluateCeiling,
+  sensorTrust,
+  sensorClimbScale,
   selfTest as collisionSelfTest,
 } from './avoidance/CollisionDetector';
 
@@ -73,6 +87,44 @@ export {
   applyAvoidance,
   selfTest as steeringSelfTest,
 } from './avoidance/SteeringBehavior';
+
+// ── 避障层：时间维度守护（P1：滤波 / 迟滞 / 失联计时 / 走廊软权重）──
+export {
+  DEPTH_TAU_SEC,
+  AVOID_HYSTERESIS_M,
+  CORRIDOR_SOFT_SPAN,
+  TemporalState,
+  BlindTracker,
+  TemporalGuard,
+  filterDistance,
+  emergencyWithHysteresis,
+  corridorWeight,
+  smoothstep01,
+  selfTest as temporalGuardSelfTest,
+} from './avoidance/TemporalGuard';
+
+// ── 避障层：预测式速度障碍（P3：TTC + 半空间投影）────────────────
+export {
+  VO_TTC_SEC,
+  VO_CLEARANCE_M,
+  VO_ITERATIONS,
+  VO_CLOSING_EPS,
+  SectorInput,
+  VoOptions,
+  DEFAULT_VO,
+  VoConstraint,
+  VoResult,
+  approachSpeed,
+  timeToCollision,
+  minTtc,
+  sectorLimit,
+  buildVoConstraints,
+  projectVelocity,
+  solveVelocityObstacle,
+  pickThreatSector,
+  buildSectors,
+  selfTest as velocityObstacleSelfTest,
+} from './avoidance/VelocityObstacle';
 
 // ── 模型层：飞控状态机（运动学内核）──────────────────────────────
 export {
