@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { selfTest as collisionSelfTest } from '../src/avoidance/CollisionDetector';
 import { selfTest as steeringSelfTest } from '../src/avoidance/SteeringBehavior';
+import { selfTest as temporalGuardSelfTest } from '../src/avoidance/TemporalGuard';
+import { selfTest as velocityObstacleSelfTest } from '../src/avoidance/VelocityObstacle';
 import { DroneController } from '../src/model/DroneController';
 import { selfTest as hudSelfTest } from '../src/telemetry/HudModel';
 import { selfTest as rotorMixerSelfTest, RotorPlant } from '../src/dynamics/RotorMixer';
@@ -29,6 +31,14 @@ describe('in-code selfTest (collision/steering/drone/hud)', () => {
 
   it('SteeringBehavior.selfTest 通过', () => {
     expect(steeringSelfTest()).toContain('PASS');
+  });
+
+  it('TemporalGuard.selfTest 通过（P1 时间维度）', () => {
+    expect(temporalGuardSelfTest()).toContain('PASS');
+  });
+
+  it('VelocityObstacle.selfTest 通过（P3 预测式）', () => {
+    expect(velocityObstacleSelfTest()).toContain('PASS');
   });
 
   it('DroneController.selfTest 不抛错', () => {

@@ -28,9 +28,28 @@ import {
   SteeringParams,
   applyAvoidance,
 } from '../avoidance/SteeringBehavior';
+import {
+  CeilingInfo,
+  SensorTrust,
+  avoidMarginFor,
+  evaluateCeiling,
+  isValidDistance,
+  sensorClimbScale,
+  sensorTrust,
+} from '../avoidance/CollisionDetector';
+import { TemporalGuard, TemporalState } from '../avoidance/TemporalGuard';
+import {
+  DEFAULT_VO,
+  SectorInput,
+  VoOptions,
+  VoResult,
+  buildSectors,
+  pickThreatSector,
+  solveVelocityObstacle,
+} from '../avoidance/VelocityObstacle';
 import { Logger } from '../core/Logger';
 import { Vec3 } from '../core/Vec3';
-import { SpatialPerception } from '../contract/SpatialPerception';
+import { SectorScan, SpatialPerception } from '../contract/SpatialPerception';
 import { EnvironmentPerception } from '../contract/EnvironmentPerception';
 import { WIND_GAIN } from '../environment/Atmosphere';
 import {
@@ -453,6 +472,76 @@ export class DroneController {
     maxSpeed: DEFAULT_STEERING.maxSpeed,
     steerGain: DEFAULT_STEERING.steerGain,
   };
+
+  // ── P0：接通物理层已有算法（垂直避障 / 失联兜底 / 绕行择优）────────
+  // 三者都**默认关闭**：算法在物理层早已实现并通过 selfTest，缺的只是"接线"。
+  // 关掉时与旧行为逐位一致（由既有单测与场景守门）。
+
+  /**
+   * 垂直避障开关（P0-1）。开启后 evaluateCeiling() 参与爬升限速：
+   * 上方净距越小，允许的上升速度越低；进入上方硬停面则完全禁止上升。
+   * 取舍（与物理层一致）：**只压上升，绝不强推下降** —— 用户下方可能才是安全区。
+   */
+  public ceilingAvoidEnabled: boolean = false;
+  /** 上方净距（米），由 SpatialPerception.getCeilingDistance() 每帧写入；∞ = 盲 */
+  public ceilingDistance: number = Infinity;
+  /** 上方避障强度 0..1（诊断用） */
+  public ceilingStrength: number = 0;
+  /** 是否处于上方急停（诊断用） */
+  public ceilingEmergency: boolean = false;
+
+  /**
+   * 感知失联兜底开关（P0-2）。开启后按连续失联时长分档限制爬升
+   * （normal 全量 / cautious 削弱 / hold 禁止），把 sensorTrust() 接进链路。
+   */
+  public trustFallbackEnabled: boolean = false;
+  /** 当前兜底档位 */
+  public trustLevel: SensorTrust = 'normal';
+  /** 已连续失联时长（秒）—— sensorTrust 的输入，无论开关与否都计时 */
+  public blindSec: number = 0;
+  /** 本机是否支持深度（false 时立即 hold，不等超时） */
+  public depthSupported: boolean = true;
+
+  /**
+   * 规划式绕行开关（P0-3）。开启后把障碍横向偏置喂给 applyAvoidance，
+   * 使 pickAvoidSide 的"择优绕行"在库内路径上真正生效
+   * （此前控制器恒传 bypassMode=false / lateral=0，等于该能力从未启用）。
+   */
+  public bypassEnabled: boolean = false;
+  /** 障碍横向偏置（米，机体右向为正），由契约或威胁扇区推导 */
+  public obstacleLateral: number = 0;
+
+  // ── P1：时间维度守护（滤波 + 迟滞 + 失联计时）──────────────────────
+  /**
+   * 时间维度守护开关（P1）。开启后前向距离先过一阶低通，急停判定带迟滞。
+   * 关闭时每一帧都走"原始读数 + 无迟滞判定"的既有路径（零回归）。
+   */
+  public temporalEnabled: boolean = false;
+  /** 时间维度守护状态机（滤波记忆 + 急停迟滞 + 失联计时） */
+  public readonly guard: TemporalGuard = new TemporalGuard();
+  /** 滤波后的前向净距（米，诊断用）；仅在 temporalEnabled 时有意义，否则恒等于原始读数 */
+  public filteredDistance: number = Infinity;
+
+  // ── P2/P3：多扇区 + 预测式速度障碍 ─────────────────────────────────
+  /**
+   * 预测式避障开关（P3）。开启后把反应式层的输出再投影到速度障碍半空间交集上。
+   * 叠加而非替换：投影只会让速度更保守，故"启用只会更安全"。
+   */
+  public voEnabled: boolean = false;
+  /** 速度障碍求解参数 */
+  public voOptions: VoOptions = {
+    ttcSec: DEFAULT_VO.ttcSec,
+    clearance: DEFAULT_VO.clearance,
+    corridorHalf: DEFAULT_VO.corridorHalf,
+    maxSpeed: DEFAULT_VO.maxSpeed,
+    iterations: DEFAULT_VO.iterations,
+  };
+  /** 本帧最小碰撞时间（秒，诊断用；无障碍 = ∞） */
+  public lastTtcSec: number = Infinity;
+  /** 本帧预测层是否修正过速度（诊断用） */
+  public voBlocked: boolean = false;
+  /** 本帧参与约束的扇区数（诊断用） */
+  public voConstraints: number = 0;
 
   /** 飞行动力学参数（入口页「最大速度」会改写 maxSpeed） */
   public params: DroneFlightParams = {
@@ -1105,10 +1194,53 @@ export class DroneController {
     let targetVZ: number = (fz * inputY + rz * inputX) * p.maxSpeed;
 
     // —— 前向障碍距离：优先来自 SpatialPerception，否则回退到 obstacleDistance 字段 ——
-    const distance: number = this.perception
+    const rawDistance: number = this.perception
       ? this.perception.getObstacleDistance()
       : this.obstacleDistance;
-    this.obstacleDistance = distance; // 缓存，供 describe() 诊断展示
+    this.obstacleDistance = rawDistance; // 缓存，供 describe() 诊断展示
+
+    // —— P1：时间维度守护（一阶低通 + 急停迟滞 + 失联计时）——
+    // 关闭时 distance 就是原始读数、急停不带迟滞 —— 与旧行为逐位一致。
+    // 硬停面取法**必须**与 applyAvoidance 内部一致（见下），否则迟滞会与
+    // 反应式层用两套 margin，出现"迟滞说已解除、反应层还在急停"的错位。
+    const curSpeed: number = Math.sqrt(this.velX * this.velX + this.velZ * this.velZ);
+    const effMargin: number = (this.steering.emergencyDist !== DEFAULT_STEERING.emergencyDist) ?
+      this.steering.emergencyDist : avoidMarginFor(curSpeed);
+    let distance: number = rawDistance;
+    let guardState: TemporalState | null = null;
+    if (this.temporalEnabled) {
+      guardState = this.guard.step(dt, rawDistance, effMargin);
+      distance = guardState.distance;
+      this.blindSec = guardState.blindSec;
+      this.filteredDistance = distance;
+    } else {
+      // 守护关闭时失联计时仍推进：trustFallback 可以单独开，不该依赖滤波开关
+      this.blindSec = this.guard.blind.update(dt, isValidDistance(rawDistance));
+      this.filteredDistance = rawDistance;
+    }
+
+    // —— P2：多扇区扫描（可选契约；未实现 → 空数组 → 走既有单标量路径）——
+    const scan: SectorScan | null = (this.perception !== null && this.perception.getSectorScan) ?
+      this.perception.getSectorScan() : null;
+    const sectors: SectorInput[] = (scan !== null && scan.confidence > 0 &&
+      scan.sectors.length > 0) ? scan.sectors : [];
+
+    // —— P0-3：绕行方位（契约优先，其次由威胁扇区推导）——
+    let lateral: number = 0;
+    if (this.perception !== null && this.perception.getObstacleLateral) {
+      lateral = this.perception.getObstacleLateral();
+    } else if (sectors.length > 0) {
+      // 用**期望速度**挑 TTC 最小的扇区：一个 3m 外正对着的墙比 0.5m 外的
+      // 侧方近障更该被优先处理 —— 按距离排序会选错，按 TTC 不会。
+      const ti: number = pickThreatSector(sectors, targetVX, targetVZ, this.voOptions);
+      if (ti >= 0) {
+        lateral = (sectors[ti].lateral !== undefined) ? (sectors[ti].lateral as number) : 0;
+      }
+    }
+    if (!isFinite(lateral)) {
+      lateral = 0; // 脏数据不得污染绕行方向（NaN 会让 pickAvoidSide 直接返回 0，等价死区）
+    }
+    this.obstacleLateral = lateral;
 
     // —— Phase 4 物理层：避障（CollisionDetector + SteeringBehavior）——
     // 原先这段是写在飞控里的内联阈值运算；现在改由 Layer 5 承担，
@@ -1121,16 +1253,17 @@ export class DroneController {
       this.steering.maxSpeed = p.maxSpeed;
       // speed 传**当前实际水平速度**：硬停面随速度伸缩（刹车距离约束，
       // margin(v) = 0.25 + v²/3），与 App 侧运动学内核同口径（2026-10-05 同步）。
-      // bypassMode 显式传 false、横向偏置传 0：库内控制器暂无绕行方位输入，
-      // 保持「未启用绕行」的既有行为（App 侧动力学路径的 bypass 接线归 M3）。
-      const curSpeed: number = Math.sqrt(this.velX * this.velX + this.velZ * this.velZ);
+      // bypassMode / 横向偏置由 P0-3 的两个开关驱动，默认均关闭 → 零回归。
       const av: AvoidResult = applyAvoidance(targetVX, targetVZ, fx, fz,
-        distance, this.steering, false, 0, curSpeed);
+        distance, this.steering, this.bypassEnabled, lateral, curSpeed);
       targetVX = av.vx;
       targetVZ = av.vz;
       this.avoidStrength = av.avoidStrength;
-      this.avoidEmergency = av.emergency;
-      if (av.emergency) {
+      // 急停判定：开启时间守护时走迟滞结果（防硬停面边界逐帧翻转）
+      const emergencyFinal: boolean = (guardState !== null) ?
+        guardState.emergency : av.emergency;
+      this.avoidEmergency = emergencyFinal;
+      if (emergencyFinal) {
         // 急停：刹掉当前「朝障碍去」的前进速度分量。
         // 横移/后退分量保留 —— 这正是真机验证过的「贴墙滑行不撞墙」。
         const approach: number = this.velX * fx + this.velZ * fz;
@@ -1140,11 +1273,53 @@ export class DroneController {
         }
       }
       this.avoidanceActive = av.braking;
+
+      // —— P3：预测式速度障碍（叠加在反应式层之上）——
+      // 投影只会让速度更保守（半空间投影 = 减去超出量，|v| 不增），
+      // 因此"启用预测层只会更安全"，不会推翻反应式层的已验证手感。
+      if (this.voEnabled && sectors.length > 0) {
+        this.voOptions.maxSpeed = p.maxSpeed;
+        const vo: VoResult = solveVelocityObstacle(targetVX, targetVZ, sectors, this.voOptions);
+        targetVX = vo.vx;
+        targetVZ = vo.vz;
+        this.lastTtcSec = vo.minTtcSec;
+        this.voBlocked = vo.blocked;
+        this.voConstraints = vo.constraints;
+      } else {
+        this.lastTtcSec = Infinity;
+        this.voBlocked = false;
+        this.voConstraints = 0;
+      }
     } else {
       this.avoidStrength = 0;
       this.avoidEmergency = false;
       this.avoidanceActive = false;
+      this.lastTtcSec = Infinity;
+      this.voBlocked = false;
+      this.voConstraints = 0;
     }
+
+    // —— P0-1/P0-2：垂直维度（上方避障 + 感知失联兜底）→ 爬升许可系数 ——
+    // 两者都**只压上升、绝不强推下降**：下方可能才是安全区（下有平台），
+    // 主动下压会把用户送到地面上去。关闭时 climbScale 恒为 1 → 零回归。
+    let climbScale: number = 1;
+    if (this.trustFallbackEnabled) {
+      const supported: boolean = (this.perception !== null && this.perception.isDepthSupported) ?
+        this.perception.isDepthSupported() : this.depthSupported;
+      this.trustLevel = sensorTrust(supported, this.blindSec);
+      climbScale *= sensorClimbScale(this.trustLevel);
+    }
+    if (this.ceilingAvoidEnabled) {
+      const cd: number = (this.perception !== null && this.perception.getCeilingDistance) ?
+        this.perception.getCeilingDistance() : this.ceilingDistance;
+      this.ceilingDistance = cd;
+      const ci: CeilingInfo = evaluateCeiling(cd);
+      this.ceilingStrength = ci.avoidStrength;
+      this.ceilingEmergency = ci.emergency;
+      climbScale *= (1 - ci.avoidStrength);
+    }
+    // 垂直通道统一乘这个系数（动力学内核通过 climbSource 透传）
+    const climbCmd: number = climbSource * climbScale;
     // —— 环境风场：由 EnvironmentPerception（第二个契约）每帧读入（M3 Step2 移到分支前，双内核共用）——
     // 未接入或关闭时，风场与密度一律归零 —— 对运动学**零影响**（零回归硬保证）。
     if (active && this.environmentActive && this.environment !== null) {
@@ -1164,7 +1339,8 @@ export class DroneController {
     // 运动学路径（默认）整段逐位不变；动力学路径在 stepDynamics 内自管积分与姿态。
     const hasMoveInput: boolean = (inputX !== 0) || (inputY !== 0);
     if (this.useDynamics && this.dynamics !== null) {
-      this.stepDynamics(dt, targetVX, targetVZ, climbSource, yawSource, fx, fz, rx, rz, p, hasMoveInput);
+      // climbCmd 已含垂直避障 / 失联兜底的爬升许可系数（关闭时 = climbSource，零回归）
+      this.stepDynamics(dt, targetVX, targetVZ, climbCmd, yawSource, fx, fz, rx, rz, p, hasMoveInput);
       this.syncState();
       return;
     }
@@ -1234,7 +1410,8 @@ export class DroneController {
     }
 
     // —— 垂直：上升 / 下降 ——
-    const targetVY: number = climbSource * p.climbSpeed;
+    // climbCmd = 杆量 × 爬升许可系数（上方避障 + 失联兜底；两者关闭时系数恒为 1）
+    const targetVY: number = climbCmd * p.climbSpeed;
     if (targetVY !== 0) {
       this.velY = approachValue(this.velY, targetVY, p.climbAccel * dt);
     } else {
@@ -1389,7 +1566,32 @@ export class DroneController {
       `实速${(this.velX * this.forwardX + this.velZ * this.forwardZ).toFixed(2)}m/s\n` +
       `防撞 ${this.avoidanceEnabled ? (this.avoidanceActive ? '刹停中' : '监控中') : '关闭'} ` +
       `障碍 ${isFinite(this.obstacleDistance) ? this.obstacleDistance.toFixed(2) + 'm' : '∞'}`;
-    return s;
+    // —— 避障演进诊断（P0/P1/P2/P3）：只在对应开关打开时追加，
+    //    关闭时输出逐位保持原样，避免面板行号漂移影响既有日志比对 ——
+    const extra: string[] = [];
+    if (this.ceilingAvoidEnabled) {
+      extra.push(`上方 ${isFinite(this.ceilingDistance) ?
+        this.ceilingDistance.toFixed(2) + 'm' : '∞'} 强度${(this.ceilingStrength * 100).toFixed(0)}%` +
+        (this.ceilingEmergency ? ' 急停' : ''));
+    }
+    if (this.trustFallbackEnabled) {
+      extra.push(`感知信任 ${this.trustLevel}（失联${this.blindSec.toFixed(1)}s）`);
+    }
+    if (this.bypassEnabled) {
+      const dir: string = this.obstacleLateral > 0 ? '障碍偏右→向左绕' :
+        (this.obstacleLateral < 0 ? '障碍偏左→向右绕' : '方位未知→默认向右');
+      extra.push(`绕行 ${dir}（偏置${this.obstacleLateral.toFixed(2)}m）`);
+    }
+    if (this.voEnabled) {
+      extra.push(`预测层 TTC${isFinite(this.lastTtcSec) ?
+        this.lastTtcSec.toFixed(2) + 's' : '∞'} 约束${this.voConstraints}条` +
+        (this.voBlocked ? ' 已介入' : ''));
+    }
+    if (this.temporalEnabled) {
+      extra.push(`滤波 ${isFinite(this.filteredDistance) ?
+        this.filteredDistance.toFixed(2) + 'm' : '∞'}`);
+    }
+    return (extra.length === 0) ? s : `${s}\n` + extra.join('　');
   }
 
   /**
@@ -1794,6 +1996,252 @@ export class DroneController {
       check('硬停面内松杆悬停 ↛ 被推向障碍',
         d.offsetZ >= zAtRelease - 0.02);
       check('硬停面内松杆悬停 → 速度归零', d.speed < 0.06);
+    }
+
+    // 17) P0：垂直避障（上方净距）接线 —— 默认关（零回归）；
+    //     开启后**只压上升、绝不强推下降**，且进入上方硬停面时完全禁止爬升。
+    {
+      const climbFrames: number = 120; // 2 秒
+      const runClimb = (ceiling: number, enable: boolean): number => {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        d.obstacleDistance = Infinity;
+        d.ceilingAvoidEnabled = enable;
+        d.ceilingDistance = ceiling; // 无 perception 时回退到字段（契约未实现的等价路径）
+        d.climbInput = 1;
+        const y0: number = d.offsetY;
+        for (let i = 0; i < climbFrames; i++) {
+          d.update(1 / 60);
+        }
+        return d.offsetY - y0;
+      };
+      const free: number = runClimb(Infinity, true);
+      const baseline: number = runClimb(Infinity, false);
+      check('P0垂直：上方无实体 → 爬升不受限（零回归）', Math.abs(free - baseline) < 1e-9);
+      const nearCeil: number = runClimb(0.5, true); // 减速带内（上方 safeDist=0.9m）
+      check('P0垂直：上方减速带内爬升被削弱', nearCeil > 0 && nearCeil < baseline * 0.5);
+      const hardCeil: number = runClimb(0.1, true); // 上方硬停面内（0.35m）
+      check('P0垂直：上方硬停面内禁止爬升', Math.abs(hardCeil) < 1e-6);
+      // 关键取舍：**绝不强推下降** —— 用户下方可能才是安全区
+      {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        d.obstacleDistance = Infinity;
+        d.ceilingAvoidEnabled = true;
+        d.ceilingDistance = 0.1;
+        const y0: number = d.offsetY;
+        for (let i = 0; i < climbFrames; i++) {
+          d.update(1 / 60); // climbInput = 0（不按键）
+        }
+        check('P0垂直：上方受阻时不强推下降（下方可能更安全）', d.offsetY >= y0 - 1e-6);
+      }
+    }
+
+    // 18) P0：感知失联兜底接线 —— 默认关（零回归）；
+    //     开启后按连续失联时长分档限制爬升（normal 全量 / cautious 削弱 / hold 禁止）。
+    {
+      const blind: SpatialPerception = {
+        getObstacleDistance: (): number => Infinity,
+        isDepthSupported: (): boolean => true
+      };
+      const runBlind = (seconds: number, enable: boolean):
+        { trust: SensorTrust; rise: number } => {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        d.trustFallbackEnabled = enable;
+        // 爬升速度刻意压低：默认 1.2m/s 在 4 秒内就会撞上 maxHeight=5m，
+        // 两条曲线都会饱和到同一高度，差异被抹平 —— 那就测不出兜底是否生效。
+        d.params.climbSpeed = 0.2;
+        d.perception = blind;
+        d.climbInput = 1;
+        const y0: number = d.offsetY;
+        for (let i = 0; i < Math.round(60 * seconds); i++) {
+          d.update(1 / 60);
+        }
+        return { trust: d.trustLevel, rise: d.offsetY - y0 };
+      };
+      check('P0兜底：刚失联 = normal（瞬态不升级）', runBlind(1, true).trust === 'normal');
+      check('P0兜底：失联 4 秒 = cautious', runBlind(4, true).trust === 'cautious');
+      check('P0兜底：失联 13 秒 = hold', runBlind(13, true).trust === 'hold');
+      check('P0兜底：关闭时档位恒为 normal（零回归）', runBlind(13, false).trust === 'normal');
+      // hold 档必须真的停住爬升（否则"看着 HUD 绿标盲飞"照旧）
+      const held: { trust: SensorTrust; rise: number } = runBlind(13, true);
+      const heldBaseline: { trust: SensorTrust; rise: number } = runBlind(13, false);
+      check('P0兜底：hold 档实际压住爬升',
+        held.trust === 'hold' && held.rise < heldBaseline.rise - 0.05);
+      // 本机不支持深度 → 立即 hold，不等 12 秒（等下去只是白飞）
+      const unsupported: DroneController = new DroneController();
+      unsupported.placed = true;
+      unsupported.flying = true;
+      unsupported.trustFallbackEnabled = true;
+      unsupported.perception = {
+        getObstacleDistance: (): number => Infinity,
+        isDepthSupported: (): boolean => false
+      };
+      unsupported.update(1 / 60);
+      check('P0兜底：本机不支持深度 → 立即 hold', unsupported.trustLevel === 'hold');
+    }
+
+    // 19) P0：绕行方位接线 —— 默认关（零回归）；
+    //     开启后 pickAvoidSide 的"择优绕行"在库内路径上真正生效。
+    {
+      const runBypass = (lateral: number, enable: boolean): number => {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        d.bypassEnabled = enable;
+        d.perception = {
+          getObstacleDistance: (): number => 1.0, // 静止时落在减速带内（safeDist(0)=1.45m）
+          getObstacleLateral: (): number => lateral
+        };
+        d.moveY = 1; // 直推障碍、无横移输入
+        for (let i = 0; i < 60; i++) {
+          d.update(1 / 60);
+        }
+        return d.velX;
+      };
+      const off: number = runBypass(0.8, false);
+      check('P0绕行：关闭时不凭空侧移（零回归）', Math.abs(off) < 1e-9);
+      const right: number = runBypass(0.8, true); // 障碍在右 → 向左绕（世界 -X）
+      check('P0绕行：障碍在右 → 向左绕', right < -0.01);
+      const left: number = runBypass(-0.8, true); // 障碍在左 → 向右绕（世界 +X）
+      check('P0绕行：障碍在左 → 向右绕', left > 0.01);
+      check('P0绕行：左右镜像（不得偏向一侧）', Math.abs(right + left) < 1e-6);
+      // 死区内：pickAvoidSide 返回 0 → 回落既有「永远向右」行为（SteeringBehavior
+      // 的零回归约定），而不是"不绕行"—— 后者对既有 bypass 体验是破坏性的。
+      const dead: number = runBypass(0.05, true);
+      check('P0绕行：死区内回落既有向右行为（零回归）', dead > 0.01);
+    }
+
+    // 20) P1：时间维度守护接线 —— 默认关（零回归）；
+    //     开启后硬停面边界的急停抖动必须消失（这是它存在的唯一理由）。
+    {
+      const runChatter = (enable: boolean): number => {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        d.temporalEnabled = enable;
+        d.moveY = 0; // 不移动，纯看判定翻转
+        let flips: number = 0;
+        let prev: boolean = false;
+        for (let i = 0; i < 200; i++) {
+          d.obstacleDistance = 0.25 + ((i % 2 === 0) ? -0.01 : 0.01); // 在硬停面两侧反复横跳
+          d.update(1 / 60);
+          if (d.avoidEmergency !== prev) {
+            flips++;
+          }
+          prev = d.avoidEmergency;
+        }
+        return flips;
+      };
+      const flipsOff: number = runChatter(false);
+      const flipsOn: number = runChatter(true);
+      check('P1迟滞：关闭时确实在抖（反证：问题真实存在）', flipsOff > 10);
+      check('P1迟滞：开启后抖动消失（翻转 ≤ 1 次）', flipsOn <= 1);
+      // 盲帧不得被插值成安全读数（滤波的首要纪律）
+      const d: DroneController = new DroneController();
+      d.placed = true;
+      d.flying = true;
+      d.temporalEnabled = true;
+      d.obstacleDistance = 2.0;
+      d.update(1 / 60);
+      check('P1滤波：首帧直接采信（无缓升延迟）', Math.abs(d.filteredDistance - 2.0) < 1e-9);
+      d.obstacleDistance = Infinity;
+      d.update(1 / 60);
+      check('P1滤波：盲帧原样透传（不伪装成安全读数）', d.filteredDistance === Infinity);
+      check('P1失联计时：盲帧累计秒数', Math.abs(d.blindSec - 1 / 60) < 1e-12);
+      d.obstacleDistance = 1.0;
+      d.update(1 / 60);
+      check('P1滤波：恢复首帧不插值旧值', Math.abs(d.filteredDistance - 1.0) < 1e-9);
+      check('P1失联计时：恢复后归零', d.blindSec === 0);
+    }
+
+    // 21) P2/P3：多扇区 + 预测式速度障碍接线 —— 默认关（零回归）；
+    //     开启后必须"只更安全"（接近速度被压低、切向保留），且无扇区数据时完全不介入。
+    {
+      const N: number = 8;
+      const scanOf = (front: number): SectorScan => ({
+        sectors: buildSectors(0, Array.from({ length: N }, (_, i) => (i === 0 ? front : Infinity))),
+        timestampSec: 0,
+        confidence: 1
+      });
+      const runApproach = (enable: boolean, withScan: boolean): number => {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        d.voEnabled = enable;
+        d.perception = {
+          getObstacleDistance: (): number => 1.0,
+          getSectorScan: (): SectorScan | null => (withScan ? scanOf(1.0) : null)
+        };
+        d.moveY = 1; // 满前向冲向 1.0m 处的墙
+        for (let i = 0; i < 180; i++) {
+          d.update(1 / 60);
+        }
+        return d.speed;
+      };
+      const baseline: number = runApproach(false, true);
+      const noScan: number = runApproach(true, false);
+      check('P3：无扇区数据时预测层完全不介入（零回归）',
+        Math.abs(noScan - baseline) < 1e-9);
+      const withVo: number = runApproach(true, true);
+      check('P3：预测层压低接近速度（只更安全）', withVo < baseline + 1e-9);
+      // 切向保留：贴墙滑行的基础不能被预测层破坏
+      {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        d.voEnabled = true;
+        d.perception = {
+          getObstacleDistance: (): number => 1.0,
+          getSectorScan: (): SectorScan | null => scanOf(1.0)
+        };
+        d.moveX = 1; // 纯横移（沿墙滑）
+        for (let i = 0; i < 180; i++) {
+          d.update(1 / 60);
+        }
+        check('P3：切向不受约束（贴墙滑行保留）', Math.abs(d.velX) > 1.4);
+      }
+      // P2：多扇区推导绕行方位（无需 getObstacleLateral，也能知道障碍偏哪边）
+      {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        // 关键：能推导出方位的必须是**正在被接近**的扇区。
+        // 正右方（i=6）虽然近，但接近速度为 0（TTC=∞）→ 不是威胁，不该被选中；
+        // 右前方（i=N−1，θ=315°）既有横向偏置、又正被接近，才是真正的威胁扇区。
+        d.perception = {
+          getObstacleDistance: (): number => Infinity,
+          getSectorScan: (): SectorScan | null => ({
+            sectors: buildSectors(0, Array.from({ length: N },
+              (_, i) => (i === N - 1 ? 0.6 : Infinity))),
+            timestampSec: 0,
+            confidence: 1
+          })
+        };
+        d.moveY = 1;
+        d.update(1 / 60);
+        check('P2：由威胁扇区推导出横向偏置（右为正）', d.obstacleLateral > 0);
+        // 反证：正右方的近障因接近速度为 0，不构成威胁（TTC 排序而非距离排序）
+        const dSide: DroneController = new DroneController();
+        dSide.placed = true;
+        dSide.flying = true;
+        dSide.perception = {
+          getObstacleDistance: (): number => Infinity,
+          getSectorScan: (): SectorScan | null => ({
+            sectors: buildSectors(0, Array.from({ length: N },
+              (_, i) => (i === 6 ? 0.6 : Infinity))),
+            timestampSec: 0,
+            confidence: 1
+          })
+        };
+        dSide.moveY = 1;
+        dSide.update(1 / 60);
+        check('P2：纯侧方近障不算威胁（按 TTC 而非距离排序）', dSide.obstacleLateral === 0);
+      }
     }
 
     if (fails.length !== 0) {
