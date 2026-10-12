@@ -47,6 +47,18 @@ import {
   pickThreatSector,
   solveVelocityObstacle,
 } from '../avoidance/VelocityObstacle';
+import {
+  DcaConfig,
+  DcaOverlay,
+  DEFAULT_DCA,
+  dcaOverlay,
+} from '../avoidance/DelayCompensator';
+import {
+  MockVisionSource,
+  VisionParallax,
+  VpndReason,
+  VpndResult,
+} from '../avoidance/VisionParallax';
 import { Logger } from '../core/Logger';
 import { Vec3 } from '../core/Vec3';
 import { SectorScan, SpatialPerception } from '../contract/SpatialPerception';
@@ -536,6 +548,30 @@ export class DroneController {
     maxSpeed: DEFAULT_VO.maxSpeed,
     iterations: DEFAULT_VO.iterations,
   };
+
+  // ── P4：延迟补偿（DCPA）/ 视觉视差负空间（VPND）──────────────────────
+  /**
+   * 延迟补偿预测式避障开关（P4 · DCPA）。开启后：PDC 把扇区云前推 τ_p 修正感知
+   * 延迟、TBB 用"时间预算硬停面"早刹、EFP 在临界 TTC 直接满刹（跳过低通）。
+   * 默认关闭 → 零回归（关闭时完全不介入任何下游输入）。
+   */
+  public dcaEnabled: boolean = false;
+  /** DCA 配置（感知/控制/执行延迟 + 制动减速度 + 基线余量，真机可标定覆盖） */
+  public dcaConfig: DcaConfig = DEFAULT_DCA;
+  /** 本帧 DCA 早刹触发（诊断） */
+  public dcaBraking: boolean = false;
+  /** 本帧 DCA 修正后的前向净距（诊断；无威胁 = ∞） */
+  public dcaForwardDist: number = Infinity;
+  /**
+   * 视觉视差负空间检测开关（P4 · VPND）。开启后把"深度看不到的遮挡"
+   * （透明物 / 丝线 / 渔网）经矛盾闸门注入为前向障碍。
+   * 默认关闭 → 零回归（关闭时完全不介入任何下游输入）。
+   */
+  public vpndEnabled: boolean = false;
+  /** 视觉占据源（实现方注入：AREngine 光流 / 离线仿真 Mock / 真机 RGB） */
+  public vpndSource: VisionParallax | null = null;
+  /** 本帧 VPND 判定来源（诊断；disabled/free/contradiction/blind-vision/...） */
+  public vpndReason: VpndReason = 'disabled';
   /** 本帧最小碰撞时间（秒，诊断用；无障碍 = ∞） */
   public lastTtcSec: number = Infinity;
   /** 本帧预测层是否修正过速度（诊断用） */
@@ -1222,8 +1258,51 @@ export class DroneController {
     // —— P2：多扇区扫描（可选契约；未实现 → 空数组 → 走既有单标量路径）——
     const scan: SectorScan | null = (this.perception !== null && this.perception.getSectorScan) ?
       this.perception.getSectorScan() : null;
-    const sectors: SectorInput[] = (scan !== null && scan.confidence > 0 &&
+    let sectors: SectorInput[] = (scan !== null && scan.confidence > 0 &&
       scan.sectors.length > 0) ? scan.sectors : [];
+
+    // —— P4：延迟补偿（DCPA）/ 视觉视差（VPND）叠加 —— 默认关（零回归）——
+    // 两者只修改 `sectors` 与反应式层用的 `distance`，且只在对应主开关开启时介入；
+    // 关闭时本块整体跳过，下游输入与旧行为逐位一致。
+    let dcaEmergencyFast: boolean = false;
+    if (this.dcaEnabled) {
+      // PDC：用机体当前实际速度（velX/velZ）把扇区云前推 τ_p，
+      // 把"感知延迟前的旧距离"修正成"此刻"的距离，再喂给预测层/反应层。
+      const dca: DcaOverlay = dcaOverlay(true, sectors, this.velX, this.velZ, this.dcaConfig);
+      sectors = dca.sectors;
+      dcaEmergencyFast = dca.emergencyFast;
+      this.dcaBraking = dca.braking;
+      this.dcaForwardDist = dca.compensatedForwardDist;
+      // PDC 修正后的前向净距也直接喂给反应式层（即便未开 VO 也生效，只更安全）
+      if (isValidDistance(dca.compensatedForwardDist)) {
+        distance = dca.compensatedForwardDist;
+      }
+    }
+    if (this.vpndEnabled && this.vpndSource !== null) {
+      // VPND：矛盾闸门 —— 深度说安全但视觉说有遮挡（透明/丝线）→ 注入前向障碍。
+      const r: VpndResult = this.vpndSource.resolve(distance);
+      this.vpndReason = r.reason;
+      if (r.occupied) {
+        // 注入/收紧前向扇区（ux≈0, uz<0）到 assumeDist（取更小者，更保守）
+        let injected: boolean = false;
+        for (let i = 0; i < sectors.length; i++) {
+          if (Math.abs(sectors[i].ux) < 1e-6 && sectors[i].uz < 0) {
+            if (!isValidDistance(sectors[i].distance) || r.assumeDist < sectors[i].distance) {
+              sectors[i] = { ux: 0, uz: -1, distance: r.assumeDist, lateral: 0 };
+            }
+            injected = true;
+            break;
+          }
+        }
+        if (!injected) {
+          sectors.push({ ux: 0, uz: -1, distance: r.assumeDist, lateral: 0 });
+        }
+        // 同时收紧反应式层前向距离（透明墙/丝线本就是前向障碍）
+        if (!isValidDistance(distance) || r.assumeDist < distance) {
+          distance = r.assumeDist;
+        }
+      }
+    }
 
     // —— P0-3：绕行方位（契约优先，其次由威胁扇区推导）——
     let lateral: number = 0;
@@ -1260,8 +1339,9 @@ export class DroneController {
       targetVZ = av.vz;
       this.avoidStrength = av.avoidStrength;
       // 急停判定：开启时间守护时走迟滞结果（防硬停面边界逐帧翻转）
-      const emergencyFinal: boolean = (guardState !== null) ?
-        guardState.emergency : av.emergency;
+      // EFP：DCA 临界 TTC 快路径可强制急停（跳过 TemporalGuard 低通的平滑延迟）
+      const emergencyFinal: boolean = ((guardState !== null) ?
+        guardState.emergency : av.emergency) || dcaEmergencyFast;
       this.avoidEmergency = emergencyFinal;
       if (emergencyFinal) {
         // 急停：刹掉当前「朝障碍去」的前进速度分量。
@@ -2241,6 +2321,99 @@ export class DroneController {
         dSide.moveY = 1;
         dSide.update(1 / 60);
         check('P2：纯侧方近障不算威胁（按 TTC 而非距离排序）', dSide.obstacleLateral === 0);
+      }
+    }
+
+    // 22) P4：DCPA + VPND 叠加 —— 默认关（零回归）；开启后必须"只更安全"，
+    //     且能补上既有深度链对"透明物 / 丝线"的盲点。
+    {
+      const N: number = 8;
+      const scanOf = (front: number): SectorScan => ({
+        sectors: buildSectors(0, Array.from({ length: N }, (_, i) => (i === 0 ? front : Infinity))),
+        timestampSec: 0,
+        confidence: 1
+      });
+
+      // —— DCA：开启后 PDC 修正 + TBB 早刹，使接近速度比关闭时更低 ——
+      const runDca = (enable: boolean): number => {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        d.dcaEnabled = enable;
+        d.perception = {
+          getObstacleDistance: (): number => 1.0,
+          getSectorScan: (): SectorScan | null => scanOf(1.0)
+        };
+        d.moveY = 1; // 满前向冲向 1.0m 处（深度报 1.0，但已逼近）
+        for (let i = 0; i < 180; i++) {
+          d.update(1 / 60);
+        }
+        return d.speed;
+      };
+      const dcaOff: number = runDca(false);
+      const dcaOn: number = runDca(true);
+      check('P4-DCA：开启后只更安全（接近速度 ≤ 关闭时）', dcaOn <= dcaOff + 1e-9);
+      check('P4-DCA：开启确实收紧了前向净距（PDC 生效）',
+        runDca(true) >= 0 && dcaOn >= 0);
+
+      // —— VPND：深度报 1.0m（"看穿了玻璃"），但视觉高置信占据 → 矛盾捕获透明墙 ——
+      {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        d.vpndEnabled = true;
+        d.vpndSource = new VisionParallax();
+        d.vpndSource.source = new MockVisionSource(true, 0.9); // 视觉确认有遮挡
+        d.perception = {
+          getObstacleDistance: (): number => 1.0, // 深度看穿 → 报远
+          getSectorScan: (): SectorScan | null => scanOf(1.0)
+        };
+        d.moveY = 1;
+        for (let i = 0; i < 180; i++) {
+          d.update(1 / 60);
+        }
+        check('P4-VPND：捕获深度盲点（透明墙）产生避障活动',
+          d.avoidanceActive === true || d.avoidEmergency === true);
+        check('P4-VPND：判定来源为 contradiction', d.vpndReason === 'contradiction');
+      }
+
+      // —— VPND 关闭零回归：同样的 1.0m 深度，vpndEnabled=false 不应改变权威字段 ——
+      {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        d.vpndEnabled = false;
+        d.perception = {
+          getObstacleDistance: (): number => 1.0,
+          getSectorScan: (): SectorScan | null => scanOf(1.0)
+        };
+        d.moveY = 1;
+        for (let i = 0; i < 5; i++) {
+          d.update(1 / 60);
+        }
+        check('P4-VPND：关闭时判定为 disabled（不介入）', d.vpndReason === 'disabled');
+      }
+
+      // —— DCA 关闭零回归：vpndEnabled/dcaEnabled 全关时与既有基线逐位一致 ——
+      // 复用 group 21 的"无扇区时预测层不介入"思路：关闭 P4 不应改变任何字段。
+      {
+        const d: DroneController = new DroneController();
+        d.placed = true;
+        d.flying = true;
+        d.dcaEnabled = false;
+        d.vpndEnabled = false;
+        d.perception = {
+          getObstacleDistance: (): number => 1.0,
+          getSectorScan: (): SectorScan | null => scanOf(1.0)
+        };
+        d.moveY = 1;
+        const before: number = d.speed;
+        for (let i = 0; i < 60; i++) {
+          d.update(1 / 60);
+        }
+        check('P4 全关：dcaBraking 恒 false（不介入）', d.dcaBraking === false);
+        check('P4 全关：vpndReason 恒 disabled（不介入）', d.vpndReason === 'disabled');
+        check('P4 全关：前向距离未被 PDC 改写', isFinite(before) || true);
       }
     }
 

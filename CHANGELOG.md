@@ -6,6 +6,62 @@
 
 ---
 
+## [0.6.0] — 2026-10-13
+
+避障层演进（P4）：**DCPA 延迟补偿预测式避障 + VPND 视觉视差负空间检测**。两项均为
+**零新硬件、纯数学/纯算法叠加**，各自独立开关、默认关闭，故默认飞行手感与 0.5.0 逐位一致。
+
+> 背景：既有 P0–P3 + DCPA 前身仍有一个隐含假设——"这一帧读到的距离 = 此刻的真实距离"，
+> 且全部依赖深度传感器。真机上这带来两类"算得都对、飞起来仍慢半拍 / 会撞"的缺口：
+>   ① **反应延迟**：感知延迟 τ_p、控制延迟、执行延迟让"决策用的旧距离"比真实位置旧了
+>      v·τ_total 米，高速逼近时等于凭空少算了这段刹车距离；临界急停还被 P1 低通拖慢；
+>   ② **深度盲点**：透明物（玻璃/亚克力/PET 瓶）、丝线/细杆/渔网，深度传感器天然失明，
+>      深度把"玻璃后的墙"报成"前方 3m 无障碍"，飞机照撞。
+> 本次用 DCPA 补①、VPND 补②，两者都只**增不替**、只**更安全**、默认关闭。
+
+### Added（新增）
+
+**`src/avoidance/DelayCompensator.ts` — P4 · DCPA（延迟补偿预测式避障）**
+
+| 导出 | 说明 |
+| --- | --- |
+| `compensateSectorDistance(d, vx, vz, ux, uz, τ_p)` / `compensateSectors` | **PDC 感知延迟抵消**：用机体速度把扇区云前推 τ_p，把旧距离修正成"此刻"距离；盲帧原样透传、修正为负夹 0 |
+| `requiredStoppingDistance(speed, a, τ)` / `timeBudgetMargin(speed, cfg)` | **TBB 时间预算刹车**：硬停面改为 `marginBase + v²/2a + v·τ_total`，把"延迟里还要往前冲"纳入早刹阈值 |
+| `emergencyFastPath(ttc, cfg)` | **EFP 急停快路径**：TTC ≤ τ_total + ε 直接满刹，跳过 TemporalGuard 低通 |
+| `dcaOverlay(enabled, sectors, vx, vz, cfg)` / `DelayCompensator` | 一键叠加（PDC→TBB→EFP）；关闭时原样透传、判定全 false（零回归） |
+| `DCA_TAU_PERCEPT_SEC=0.10` / `DCA_TAU_CTRL_SEC=0.05` / `DCA_TAU_ACT_SEC=0.05` / `DEFAULT_DCA` | 延迟常量（单一事实来源，真机可标定覆盖） |
+| `selfTest()` | 39 项断言（与 App 端 `DelayCompensator.ets` 同数） |
+
+**`src/avoidance/VisionParallax.ts` — P4 · VPND（视觉视差负空间检测）**
+
+| 导出 | 说明 |
+| --- | --- |
+| `VisionFlowSource`（接口）/ `MockVisionSource` | 视觉占据源契约（AREngine 光流 / 离线仿真 Mock / 真机 RGB），算法只消费"是否占据 + 置信度" |
+| `contradictionGate(depthDistance, vision, depthNear, confThresh)` | **矛盾闸门**：深度说无障碍但视觉说有遮挡（透明/丝线）→ 判为矛盾、当作障碍；深度盲+视觉占据→视觉兜底；低置信不采信 |
+| `VisionParallax` | 薄状态类，默认关闭；关闭时 `resolve()` 恒返回 `occupied=false`、`reason='disabled'`（零回归） |
+| `VPND_ASSUME_DIST_M=1.0` / `VPND_VISION_CONF_THRESH=0.5` / `VPND_DEPTH_NEAR_M` | 阈值常量（单一事实来源） |
+| `selfTest()` | 17 项断言（与 App 端 `VisionParallax.ets` 同数） |
+
+### Changed（变更）
+
+- `DroneController` 新增 `dcaEnabled` / `vpndEnabled` 主开关（默认 `false`）、`dcaConfig`、
+  `vpndSource`、`dcaBraking` / `dcaForwardDist` / `dcaEmergencyFast` / `vpndReason` 诊断字段；
+  在 `resolveAvoidanceInputs` 内接线（PDC 修正扇区 + TBB 收紧反应式层前向距离 + VPND 矛盾注入），
+  EFP 经 `|| dcaEmergencyFast` 并入急停分支。**默认关闭 → 下游输入与旧行为逐位一致**。
+- `DroneController.selfTest` 新增第 22 组（8 项断言）：验证 DCA 开启后只更安全、VPND 捕获
+  深度盲点（透明墙）、两者关闭均零回归。
+
+### Verified（验证）
+
+- `npm run verify` 全绿：`tsc --noEmit` 通过；`vitest` **110** 项全过（含新增 selfTest）；
+  `sim_flight` 黄金红线 intact——盲飞 `−21.67m`、感知驱动硬停面 `0.25m`；
+  `scenarios` 11/11、`sim_high_fidelity` 零回归全过；`check:dco` 32 提交已签名。
+- `DelayCompensator.selfTest` 39 项、`VisionParallax.selfTest` 17 项，与 App 端孪生文件**同数**。
+- 已知遗留（未修）：DCA/VPND 默认关闭，需真机逐层开启回归（仿 P1/P3 的 flag-gated 验收流程）；
+  VPND 的视觉源在真机侧由 AREngine 光流实现（本次仅提供契约 + Mock，未接 RGB 算法）。
+
+---
+
 ## [0.5.0] — 2026-10-11
 
 避障层演进：**P0 接线 → P1 时间维度 → P5 量化指标 → P2 多扇区契约 → P3 预测式速度障碍**。

@@ -7,6 +7,8 @@ import { selfTest as steeringSelfTest } from '../src/avoidance/SteeringBehavior'
 import { selfTest as fusionGeometrySelfTest } from '../src/avoidance/FusionGeometry';
 import { selfTest as temporalGuardSelfTest } from '../src/avoidance/TemporalGuard';
 import { selfTest as velocityObstacleSelfTest } from '../src/avoidance/VelocityObstacle';
+import { selfTest as delayCompensatorSelfTest } from '../src/avoidance/DelayCompensator';
+import { selfTest as visionParallaxSelfTest } from '../src/avoidance/VisionParallax';
 import { DroneController } from '../src/model/DroneController';
 import { selfTest as hudSelfTest } from '../src/telemetry/HudModel';
 import { selfTest as rotorMixerSelfTest, RotorPlant } from '../src/dynamics/RotorMixer';
@@ -45,6 +47,9 @@ run('FusionGeometry', () => fusionGeometrySelfTest());
 // ── 避障演进（P1 时间维度 / P3 预测式速度障碍）──────────────────
 run('TemporalGuard', () => temporalGuardSelfTest());
 run('VelocityObstacle', () => velocityObstacleSelfTest());
+// ── 避障演进（P4 延迟补偿 DCPA / 视觉视差负空间 VPND）──────────────
+run('DelayCompensator', () => delayCompensatorSelfTest());
+run('VisionParallax', () => visionParallaxSelfTest());
 run('DroneController', () => {
   DroneController.selfTest();
 });

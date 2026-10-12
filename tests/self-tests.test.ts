@@ -3,6 +3,8 @@ import { selfTest as collisionSelfTest } from '../src/avoidance/CollisionDetecto
 import { selfTest as steeringSelfTest } from '../src/avoidance/SteeringBehavior';
 import { selfTest as temporalGuardSelfTest } from '../src/avoidance/TemporalGuard';
 import { selfTest as velocityObstacleSelfTest } from '../src/avoidance/VelocityObstacle';
+import { selfTest as delayCompensatorSelfTest } from '../src/avoidance/DelayCompensator';
+import { selfTest as visionParallaxSelfTest } from '../src/avoidance/VisionParallax';
 import { DroneController } from '../src/model/DroneController';
 import { selfTest as hudSelfTest } from '../src/telemetry/HudModel';
 import { selfTest as rotorMixerSelfTest, RotorPlant } from '../src/dynamics/RotorMixer';
@@ -39,6 +41,14 @@ describe('in-code selfTest (collision/steering/drone/hud)', () => {
 
   it('VelocityObstacle.selfTest 通过（P3 预测式）', () => {
     expect(velocityObstacleSelfTest()).toContain('PASS');
+  });
+
+  it('DelayCompensator.selfTest 通过（P4 DCPA 延迟补偿）', () => {
+    expect(delayCompensatorSelfTest()).toContain('PASS');
+  });
+
+  it('VisionParallax.selfTest 通过（P4 VPND 透明物/丝线）', () => {
+    expect(visionParallaxSelfTest()).toContain('PASS');
   });
 
   it('DroneController.selfTest 不抛错', () => {

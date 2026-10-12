@@ -8,7 +8,9 @@
 
 | 源 App 模块（.ets） | 库模块（.ts） | 说明 |
 | --- | --- | --- |
-| `ar/DroneController.ets`（运动学 + 真实动力学双内核 + M4/M5 保真层） | `src/model/DroneController.ts` | 运动学内核（默认）+ 真实刚体动力学双内核；`setFlightMode`/`useDynamics` 切换，默认运动学（零回归）；`stepDynamics` 串起级联控制 / 混控 / 执行器一阶滞后 / 刚体积分（v0.3.0 并入）；v0.4.0 新增 L1 速率环 / L2 增强气动 / L3 湍流 / L4 执行器非线性 / L5 EKF（诊断级）/ L6 传感器噪声，全部默认关，并提供 `applyHighFidelityPreset` / `setHighFidelityEnabled` 一键装配与可逆开关 |
+| `ar/DroneController.ets`（运动学 + 真实动力学双内核 + M4/M5 保真层） | `src/model/DroneController.ts` | 运动学内核（默认）+ 真实刚体动力学双内核；`setFlightMode`/`useDynamics` 切换，默认运动学（零回归）；`stepDynamics` 串起级联控制 / 混控 / 执行器一阶滞后 / 刚体积分（v0.3.0 并入）；v0.4.0 新增 L1 速率环 / L2 增强气动 / L3 湍流 / L4 执行器非线性 / L5 EKF（诊断级）/ L6 传感器噪声，全部默认关，并提供 `applyHighFidelityPreset` / `setHighFidelityEnabled` 一键装配与可逆开关；v0.6.0 新增 `dcaEnabled` / `vpndEnabled` 主开关与 DCA/VPND 接线（默认关，零回归） |
+| `ar/DelayCompensator.ets`（P4 · DCPA） | `src/avoidance/DelayCompensator.ts` | 延迟补偿预测式避障：PDC 感知延迟抵消（`compensateSectorDistance`/`compensateSectors`）+ TBB 时间预算刹车（`requiredStoppingDistance`/`timeBudgetMargin`/`shouldBrakeEarly`）+ EFP 急停快路径（`emergencyFastPath`），`dcaOverlay` 一键叠加；默认关（零回归）；`selfTest` 39 项，与 App 同数 |
+| `ar/VisionParallax.ets`（P4 · VPND） | `src/avoidance/VisionParallax.ts` | 视觉视差负空间检测：识别深度盲点（透明物/丝线）；`VisionFlowSource` 契约 + `MockVisionSource` + `contradictionGate` 矛盾闸门 + `VisionParallax` 薄状态类；默认关（零回归）；`selfTest` 17 项，与 App 同数 |
 | `ar/WorldObject.ets` | `src/model/WorldObject.ts` | 世界对象基类（锚定 + 偏移位姿） |
 | `ar/CollisionDetector.ets` | `src/avoidance/CollisionDetector.ts` | 碰撞 / 威胁评估（纯函数） |
 | `ar/SteeringBehavior.ets`（含 bypassMode） | `src/avoidance/SteeringBehavior.ts` | 转向避障；商标化能力去商标化为 `bypassMode`；硬停面随速度伸缩（`avoidMarginFor`）、绕行方向按障碍方位择优（`pickAvoidSide`，2026-10-06 同步） |
