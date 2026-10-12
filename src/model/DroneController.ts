@@ -321,6 +321,14 @@ export class DroneController {
   public holdX: number = 0;
   public holdZ: number = 0;
   public holdEngaged: boolean = false;
+  /**
+   * P3：是否已由用户**显式**设定目标点（可视化目标点）。
+   * false（默认）＝ 旧语义：锚点每帧跟随当前位姿，松手即就地定点。
+   * true  ＝ 锚点锁定在 setHoldTarget 指定的点，摇杆操控不再改写它，
+   *          于是松杆后飞机自动飞回该点悬停（「整定成一个目标点」的飞行语义）。
+   * 与 App DroneController 同源（社区仓无 activeAlgo，故仅此轻量层）。
+   */
+  public holdTargetActive: boolean = false;
   /** 高度保持设定点（米）：松杆时高度位置环把飞机拉回此高度（M3 Step2 动力学内核用） */
   public holdY: number = 0.9;
 
@@ -728,8 +736,13 @@ export class DroneController {
     }
 
     // 保持环接合（与运动学同源）：无杆量 + 启用环境感知时定锚点
-    if (!hasMoveInput && this.environmentActive) {
-      if (!this.holdEngaged) {
+    // P3：显式设定了目标点时锚点锁定，摇杆不再改写它（镜像 App 动力学内核）
+    if (hasMoveInput && !this.holdTargetActive) {
+      this.holdX = this.offsetX;
+      this.holdZ = this.offsetZ;
+    }
+    if (!hasMoveInput && (this.environmentActive || this.holdTargetActive)) {
+      if (!this.holdTargetActive && !this.holdEngaged) {
         this.holdX = this.offsetX;
         this.holdZ = this.offsetZ;
         this.holdEngaged = true;
@@ -949,7 +962,96 @@ export class DroneController {
     this.ekfPosX = 0; this.ekfPosY = 0; this.ekfPosZ = 0;
     this.ekfVelX = 0; this.ekfVelY = 0; this.ekfVelZ = 0;
     this.prevEkvX = 0; this.prevEkvY = 0; this.prevEkvZ = 0;
+    // P3：位置保持锚点/目标点复位（镜像 App reset）
+    this.holdX = 0;
+    this.holdZ = 0;
+    this.holdY = 0.9;
+    this.holdEngaged = false;
+    this.holdTargetActive = false;
     this.batteryPercent = 100;
+  }
+
+  // ── P3：位置保持目标点（与 App DroneController 同源；社区仓无 activeAlgo，故仅此轻量层）──
+  /** 距定点锚点的水平偏差（米）。HUD 用它证明「位置保持真的在收敛」。 */
+  public get holdError(): number {
+    const dx: number = this.offsetX - this.holdX;
+    const dz: number = this.offsetZ - this.holdZ;
+    return Math.sqrt(dx * dx + dz * dz);
+  }
+
+  /** 当前是否处于「定点悬停保持」：环境感知开 + 已放置 + 在飞 + 无操控输入。 */
+  public get positionHolding(): boolean {
+    return this.environmentActive && this.placed && (this.flying || this.landing) &&
+      !this.isControlling();
+  }
+
+  /**
+   * 抗风上限（m/s）：飞机物理上最多能顶住多大的定常风。
+   * tanθ = c·ρ·v²/(m·g) → v_max = √( m·g·tan(θ_max) / (c·ρ) )。
+   */
+  public get windCeiling(): number {
+    const dp: DynamicsParams = this.dynParams;
+    const rho: number = clampValue(this.airDensityFactor, 0.6, 1.4);
+    const tanTilt: number = Math.tan(dp.maxTiltRad);
+    return Math.sqrt(dp.mass * dp.gravity * tanTilt / (dp.dragCoef * rho));
+  }
+
+  /** P3：位置保持目标点是否已显式设定（UI 据此显示「守点中」与「清除」入口）。 */
+  public get holdTargetSet(): boolean {
+    return this.holdTargetActive;
+  }
+
+  /** P3：目标点 X（offset 坐标系，相对放置锚点，m）。 */
+  public get holdTargetX(): number {
+    return this.holdX;
+  }
+
+  /** P3：目标点 Z（offset 坐标系，相对放置锚点，m）。 */
+  public get holdTargetZ(): number {
+    return this.holdZ;
+  }
+
+  /**
+   * P3：显式设定位置保持目标点（offset 坐标系）。
+   * 设定后锚点锁定在该点，摇杆不再改写它，松杆即自动飞回该点悬停。
+   * 同时立即接合保持环，使两个内核都立刻生效。
+   */
+  public setHoldTarget(x: number, z: number): void {
+    if (!isFinite(x) || !isFinite(z)) {
+      Logger.warn(`setHoldTarget 收到非有限值，已忽略 (x=${x}, z=${z})`);
+      return;
+    }
+    this.holdX = x;
+    this.holdZ = z;
+    this.holdTargetActive = true;
+    this.holdEngaged = true;
+  }
+
+  /**
+   * P3：清除目标点，回到默认语义（锚点跟随当前位姿 → 松手即就地定点）。
+   * 锚点立即复位到当前位置，避免清除瞬间被旧锚点拽一下。
+   */
+  public clearHoldTarget(): void {
+    this.holdTargetActive = false;
+    this.holdX = this.offsetX;
+    this.holdZ = this.offsetZ;
+    this.holdEngaged = false;
+  }
+
+  /**
+   * 放置时刻的初始机头朝向（度）。飞行系「前」= [-sin yaw, -cos yaw]，yaw=0 时沿世界 -Z。
+   * 动力学模式有独立的刚体 yaw 状态，须一并 sync，否则下一帧被 dyn.yaw 覆盖回去。
+   */
+  public setInitialYaw(deg: number): void {
+    if (!isFinite(deg)) {
+      return;
+    }
+    this.yaw = normalizeDeg(deg);
+    this.yawRate = 0;
+    if (this.dynamics !== null) {
+      this.dynamics.syncFrom(this.velX, this.velY, this.velZ,
+        this.pitch * DEG2RAD, this.roll * DEG2RAD, this.yaw * DEG2RAD);
+    }
   }
 
   /**
@@ -1068,6 +1170,12 @@ export class DroneController {
     }
 
     if (hasMoveInput) {
+      // P3：显式设定了目标点时锚点锁定，摇杆不再改写它（镜像 App 运动学内核）。
+      // 否则锚点跟随当前位姿，松手瞬间的位姿即「驻留点」（与动力学模式同语义）。
+      if (!this.holdTargetActive) {
+        this.holdX = this.offsetX;
+        this.holdZ = this.offsetZ;
+      }
       // 有输入：按「速度矢量」整体限速加速（推背感 / 起步不突兀）。
       // 必须按矢量而不是逐分量限速 —— 逐分量会让对角线方向得到 √2 倍合成加速度。
       const dvx: number = targetVX - this.velX;
@@ -1090,9 +1198,11 @@ export class DroneController {
       // 与动力学模式的位置环同源（复用 CascadeController.positionHoldVelocity），
       // 并叠加风扰前馈：① 前馈主动顶风，② 反馈位置环把残余误差拉回锚点。
       // environmentActive=false（默认）时整个块不介入 → 与旧开环阻尼逐位一致（零回归）。
-      if (this.environmentActive) {
+      // P3：显式设定了目标点时，即使环境感知关着，定点依然成立。
+      if (this.environmentActive || this.holdTargetActive) {
         // 首次接合：锚点定在当前位姿，避免突兀拉回。
-        if (!this.holdEngaged) {
+        // P3：显式目标点时**不**重新锚定 —— 用户设的点优先，不能被当前位姿顶掉。
+        if (!this.holdTargetActive && !this.holdEngaged) {
           this.holdX = this.offsetX;
           this.holdZ = this.offsetZ;
           this.holdEngaged = true;
@@ -1418,6 +1528,79 @@ export class DroneController {
       d.obstacleDistance = Infinity;
       d.update(1 / 60); // 无输入帧
       check('默认（环境关闭）保持环不接合', d.holdEngaged === false);
+    }
+
+    // 9b) P3：位置保持目标点（可视化目标点）的飞行语义。
+    //     默认语义必须零回归（松手即就地定点）；显式设点后锚点锁定、松杆自动飞回。
+    {
+      // (a) 默认：未设目标点 → 松杆后停在松杆处（不被拉回原点）
+      const d0: DroneController = new DroneController();
+      d0.placed = true;
+      d0.flying = true;
+      d0.environmentActive = true;
+      d0.moveY = 1;
+      for (let i = 0; i < 30; i++) {
+        d0.update(1 / 60);
+      }
+      const zRelease: number = d0.offsetZ;
+      d0.moveY = 0;
+      for (let i = 0; i < 180; i++) {
+        d0.update(1 / 60);
+      }
+      check('P3 默认语义零回归：松手即就地定点',
+        Math.abs(d0.offsetZ - zRelease) < 0.15 && d0.holdTargetSet === false);
+    }
+    {
+      const d: DroneController = new DroneController();
+      d.placed = true;
+      d.flying = true;
+      d.environmentActive = true;
+      // 先飞离原点，确认「显式目标点」不是在原点蒙对的
+      d.moveY = 1;
+      for (let i = 0; i < 40; i++) {
+        d.update(1 / 60);
+      }
+      d.moveY = 0;
+      d.setHoldTarget(0.8, 0.0);
+      check('P3 设点后 holdTargetSet=true', d.holdTargetSet === true);
+      check('P3 目标点坐标被记录',
+        Math.abs(d.holdTargetX - 0.8) < 1e-9 && Math.abs(d.holdTargetZ) < 1e-9);
+      // 推杆飞走：显式目标点**不得**被摇杆改写
+      d.moveY = 1;
+      for (let i = 0; i < 60; i++) {
+        d.update(1 / 60);
+      }
+      check('P3 推杆不改写显式目标点',
+        Math.abs(d.holdTargetX - 0.8) < 1e-9 && Math.abs(d.holdTargetZ) < 1e-9);
+      // 松杆：位置保持环应把飞机拉回该点悬停
+      d.moveY = 0;
+      for (let i = 0; i < 600; i++) {
+        d.update(1 / 60);
+      }
+      const err: number = Math.sqrt((d.offsetX - 0.8) * (d.offsetX - 0.8) + d.offsetZ * d.offsetZ);
+      check('P3 松杆后自动飞回目标点（水平误差<5cm）', err < 0.05);
+      // 清除目标点 → 回到默认语义
+      d.clearHoldTarget();
+      check('P3 清除后回到默认语义', d.holdTargetSet === false);
+    }
+    // (c) reset() 必须把目标点一并清掉（否则复位后飞机自己飞回旧点）
+    {
+      const d: DroneController = new DroneController();
+      d.setHoldTarget(1.5, -0.5);
+      d.reset();
+      check('P3 reset 清除目标点', d.holdTargetSet === false);
+    }
+
+    // 9c) 抗风上限 / 定点偏差读数
+    {
+      const d: DroneController = new DroneController();
+      d.placed = true;
+      d.flying = true;
+      check('抗风上限为有限正风速（海平面≈10.4 m/s）', Math.abs(d.windCeiling - 10.35) < 2.0);
+      d.holdX = 0.3; d.holdZ = 0.4; d.offsetX = 0; d.offsetZ = 0;
+      check('holdError = 到锚点水平距离', Math.abs(d.holdError - 0.5) < 1e-6);
+      d.environmentActive = true;
+      check('positionHolding：环境开+在飞+无输入为真', d.positionHolding === true);
     }
 
     // 10) 双内核开关（M3 Step2）：setFlightMode(true) → useDynamics 生效且懒建刚体
